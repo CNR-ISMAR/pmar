@@ -41,8 +41,6 @@ class LagrangianDispersion(object):
         OpenDrift object producing particle simulation
     poly_path : str
         path to shapefile containing polygon used for particle seeding
-    uv_path : str
-        path to netcdf file for ocean currents 
     bathy_path : str
         path to netcdf file for bathymetry (GEBCO)
     particle_path : str
@@ -78,8 +76,6 @@ class LagrangianDispersion(object):
             OpenDrift object producing particle simulation
         poly_path : str
             path to shapefile containing polygon used for particle seeding
-        uv_path : str
-            path to netcdf file for ocean currents 
         bathy_path : str
             path to netcdf file for bathymetry (GEBCO)
         particle_path : str
@@ -91,7 +87,6 @@ class LagrangianDispersion(object):
         self.depth = None
         self.o = None
         self.poly_path = None
-        self.uv_path = None
         self.bathy_path = None
         self.particle_path = None
         self.raster = None
@@ -292,7 +287,7 @@ class LagrangianDispersion(object):
         self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
 
 #### NB: what is this used for? should maybe change the name 'uv_path' as it is misleading ###
-        self.uv_path = f'{DATASET_ID}_full_basin.nc' 
+        #self.uv_path = f'{DATASET_ID}_full_basin.nc' 
 
         # bathymetry, mixed layer depth (3D case)
         if depth == True:
