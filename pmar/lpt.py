@@ -11,9 +11,8 @@ from opendrift.readers import reader_netCDF_CF_generic
 import opendrift
 from pydap.client import open_url
 from pydap.cas.get_cookies import setup_session
-from myfunctions import copernicusmarine_datastore
-from pathlib import Path
 import time as T
+from pathlib import Path
 from xhistogram.xarray import histogram
 import seaborn as sns
 spectral_r = sns.color_palette("Spectral_r", as_cmap=True)
@@ -66,7 +65,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self):
+    def __init__(self, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems'):
         """
         Parameters
         ----------
@@ -83,16 +82,22 @@ class LagrangianDispersion(object):
         raster : xarray
             xarray object containing output of particle_raster() method
         """
-        
+        Path(basedir).mkdir(parents=True, exist_ok=True)
+        self.uv_path = uv_path
+        self.wind_path = wind_path
+        self.mld_path = mld_path # so that one can also specify a local path to data file. default is 'cmems' meaning we stream the data from copernicus
+        self.basedir = Path(basedir)
         self.depth = None
         self.o = None
         self.poly_path = None
         self.bathy_path = None
         self.particle_path = None
         self.raster = None
+        self.ds = None
+        self.origin_marker = None
         pass
     
-    def run(self, pnum, basin, time, repeat_run=1, res=0.04, crs='4326', lon=None, lat=None, z=-0.5, depth=False, tstep=6, hdiff=10, termvel=1e-3, bounds=None, use_path=None, depth_layer='water_column', decay_rate=None, loglevel=20, save_to=None):         
+    def run(self, pnum, basin, time, repeat_run=1, res=0.04, crs='4326', lon=None, lat=None, z=-0.5, depth=False, tstep=6, hdiff=10, termvel=1e-3, bounds=None, use_path='even_dist', depth_layer='water_column', decay_rate=None, loglevel=20, save_to=None):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -128,8 +133,8 @@ class LagrangianDispersion(object):
         bounds : list, optional
             Spatial bounds for computation of histogram (raster) written as bounds=[x1,y1,x2,y2]. Default is None (full basin)
         use_path : str, optional
-            Path to file representing density of human use of marine environment, used for 'weights' of particles in histogram calculation. 
-            If no use_path is given, a weight of 1 is given to all particles. Default is None
+            Path to .tif file representing density of human use of marine environment, used for 'weights' of particles in histogram calculation. 
+            If no use_path is given, a weight of 1 is given to all particles ('even_dist' for even distribution).
         depth_layer : str, optional
             Depth layer chosen for computing histogram. One of 'water_column', 'surface' or 'seafloor'. Default is 'water_column'
         decay_rate : float, optional
@@ -151,7 +156,9 @@ class LagrangianDispersion(object):
         for i in range(0, repeat_run):
             t0 = t1
             t1 = t0+iter_dt
-    
+            
+            self.origin_marker = i 
+
             self.particle_simulation(pnum=pnum, basin=basin, time=[t0.strftime('%Y-%m-%d'), t1.strftime('%Y-%m-%d')], res=res, crs=crs, lon=lon, lat=lat, z=z, depth=depth, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
             particle_list[i] = self.particle_path
             
@@ -159,6 +166,8 @@ class LagrangianDispersion(object):
             
         # compute raster
         self.particle_raster(res=res, crs=crs, tstep=tstep, bounds=bounds, use_path=use_path, depth_layer=depth_layer, decay_rate=decay_rate, save_to=save_to)
+        
+        
         
         return self
     
@@ -178,9 +187,9 @@ class LagrangianDispersion(object):
         """
         
         
-        data_path = Path('/home/sbosi/data/')
+        Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
         poly_path = f'polygon-crs_epsg:{crs}.shp'
-        q = data_path / 'polygons' / poly_path
+        q = self.basedir / 'polygons' / poly_path
         
         if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
             _df = pd.DataFrame() # create dataframe 
@@ -277,18 +286,28 @@ class LagrangianDispersion(object):
             if self.poly_path is None:
                 self.poly_path = f'/home/sbosi/data/polygons/polygon-{basin}-full-basin.shp'
         
-        bds = np.round(gpd.read_file(foo.poly_path).total_bounds) # only used in particle_path
-        
+        bds = np.round(gpd.read_file(self.poly_path).total_bounds) # only used in particle_path
+       
         # stream data from Copernicus CMEMS (currents, wind)
-        DATASET_ID = f'{basin.replace("full_", "")}-cmcc-cur-rean-d' #ocean currents
-        WIND_ID = 'CERSAT-GLO-REP_WIND_L4-OBS_FULL_TIME_SERIE' #wind
-
-        self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
-        self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
-
-#### NB: what is this used for? should maybe change the name 'uv_path' as it is misleading ###
-        #self.uv_path = f'{DATASET_ID}_full_basin.nc' 
-
+        if self.uv_path == 'cmems':
+            DATASET_ID = f'{basin.replace("full_", "")}-cmcc-cur-rean-d' #ocean currents
+            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
+        elif self.uv_path != 'cmems': 
+            uv_reader = reader_netCDF_CF_generic.Reader(self.uv_path)
+            self.o.add_reader(uv_reader) # add reader from local file
+        else: 
+            raise ValueError('path to uv data file not recognised')
+            
+            
+        if self.wind_path == 'cmems':
+            WIND_ID = 'CERSAT-GLO-REP_WIND_L4-OBS_FULL_TIME_SERIE' #wind
+            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
+        elif self.wind_path != 'cmems':
+            wind_reader = reader_netCDF_CF_generic.Reader(self.wind_path)
+            self.o.add_reader(wind_reader) # add reader from local file
+        else: 
+            raise ValueError('path to wind data file not recognised')            
+        
         # bathymetry, mixed layer depth (3D case)
         if depth == True:
             # bathymetry (gebco)
@@ -297,9 +316,15 @@ class LagrangianDispersion(object):
             bathy_reader = reader_netCDF_CF_generic.Reader(self.bathy_path)
             self.o.add_reader(bathy_reader)
             
-            # mixed layer depth (cmems)
-            mld_ID = f'{basin}-cmcc-mld-rean-d'
-            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
+            if self.mld_path == 'cmems':
+                # mixed layer depth (cmems)
+                mld_ID = f'{basin}-cmcc-mld-rean-d'
+                self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
+            elif self.mld_path != 'cmems':
+                mld_reader = reader_netCDF_CF_generic.Reader(self.mld_path)
+                self.o.add_reader(mld_reader) # add reader from local file
+            else: 
+                raise ValueError('path to mld data file not recognised') 
         
         # time step and time range for simulation (user-defined)
         time_step = timedelta(hours=tstep)
@@ -308,7 +333,7 @@ class LagrangianDispersion(object):
         
         # path to write particle simulation file. used for our 'cache'
         particle_path = f'{basin}-lon_{int(bds[0])}-{int(bds[2])}_lat_{int(bds[1])}-{int(bds[3])}-pnum_{pnum}-time_{time[0]}_to_{time[1]}-tstep_{tstep}hrs-hdiff_{hdiff}-termvel_{termvel}-depth_{depth}.nc'
-        q = data_path / 'output' / particle_path
+        q =  self.basedir / particle_path
             
         # if a file with that name already exists, simply import it using OpenDrift import method. 
         if q.exists() == True:
@@ -322,14 +347,14 @@ class LagrangianDispersion(object):
             if depth == True:
                 # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
                 self.o.set_config('seed:terminal_velocity', termvel)
-                self.o.seed_from_shapefile(str(self.poly_path), number=pnum, time=start_time, terminal_velocity=termvel, z=z)
+                self.o.seed_from_shapefile(str(self.poly_path), number=pnum, time=start_time, terminal_velocity=termvel, z=z, origin_marker=self.origin_marker)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
                 self.o.set_config('drift:vertical_mixing', True)
             
             else:
                 # if simulation is 2D, simply seed particles over polygon
-                self.o.seed_from_shapefile(str(self.poly_path), number=pnum, time=start_time)
+                self.o.seed_from_shapefile(str(self.poly_path), number=pnum, time=start_time, origin_marker=self.origin_marker)
             
             # run simulation and write to temporary file
             self.o.run(end_time=end_time, time_step=time_step, outfile='temp_particle_file.nc')
@@ -342,12 +367,14 @@ class LagrangianDispersion(object):
         ps['dt'] = tstep #adding timestep to ds, will be useful later 
         ps.to_netcdf(str(q)) 
         
+        self.ds = ps
+        
         self.particle_path = particle_path
 
         pass     
     
 
-    def particle_raster(self, res=0.04, crs='4326', tstep=None, bounds=None, use_path=None, depth_layer='water_column', decay_rate=None, save_to=None):
+    def particle_raster(self, res=0.04, crs='4326', tstep=None, bounds=None, use_path='even_dist', depth_layer='water_column', decay_rate=None, save_to=None):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -377,7 +404,9 @@ class LagrangianDispersion(object):
         """
     
         start_time = T.time()
-        data_path = Path('/home/sbosi/data/')
+        #data_path = Path('/home/sbosi/data/') # this will be deprecated
+        Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
+
         
         ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
         if self.poly_path is None:
@@ -391,15 +420,15 @@ class LagrangianDispersion(object):
         else:
             pass
         
-        if type(self.particle_path) == dict:
+        if len(self.particle_path) > 1:
             for i in self.particle_path:
                 path_list = self.particle_path
-                path_list[i] = str(data_path / 'output' / path_list[i])
+                path_list[i] = str(self.basedir / path_list[i])
             
-            _ds = xr.open_mfdataset(path_list.values(), concat_dim='trajectory', combine='nested', join='override').chunk({'trajectory': 10000, 'time':1000})
+            _ds = xr.open_mfdataset(path_list.values(), concat_dim='trajectory', combine='nested', join='override').isel(time=slice(1,None)).chunk({'trajectory': 10000, 'time':1000}) # removing time 0 
         else:
-            q = data_path / 'output' / self.particle_path
-            _ds = xr.open_mfdataset(str(q), concat_dim='trajectory', combine='nested', join='override').chunk({'trajectory': 10000, 'time':1000})
+            q = self.basedir / list(self.particle_path.values())[0]
+            _ds = xr.open_mfdataset(str(q), concat_dim='trajectory', combine='nested', join='override').isel(time=slice(1,None)).chunk({'trajectory': 10000, 'time':1000}) # removing time 0
 
         
         _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID
@@ -408,11 +437,12 @@ class LagrangianDispersion(object):
         # if new timestep is given in raster request, interpolate dataset to fill in gaps
         if tstep is not None:
             new_time = np.arange(pd.to_datetime(_ds.time[0].values), pd.to_datetime(_ds.time[-1].values),timedelta(hours=tstep)) #new time variables used for interpolation
-            ds = _ds.interp(time=new_time) # interpolate dataset
+            ds = _ds.interp(time=new_time) # interpolate dataset 
             ds['dt'] = tstep
         else:
             ds = _ds
-        
+            
+
         ### BINS ### 
         if bounds is None:
             poly = gpd.read_file(self.poly_path)
@@ -421,7 +451,7 @@ class LagrangianDispersion(object):
             pass
 
         # if no use path is given, take resolution and polybounds (works even if it is full basin) and calculate bins this way. 
-        if use_path is None:
+        if use_path == 'even_dist':
             # all particles have weight 1
             weight = np.ones((ds.lon.shape))
             ds = ds.assign({'weight': (('trajectory', 'time'), weight)}, )
@@ -430,12 +460,12 @@ class LagrangianDispersion(object):
             ybin = np.arange(bounds[1],bounds[3]+res,res)
         else: 
         #create `weight` variable from value of `use` at starting positions of particles
-            use = rxr.open_rasterio(data_path / 'uses' / use_path).isel(band=0).rio.reproject('epsg:'+str(crs), resolution=res, nodata=0).drop('band').squeeze().sortby('x').sortby('y').sel(x=slice(bounds[0], bounds[2]), y=slice(bounds[1], bounds[3]))
+            use = rxr.open_rasterio(use_path).isel(band=0).rio.reproject('epsg:'+str(crs), resolution=res, nodata=0).drop('band').squeeze().sortby('x').sortby('y').sel(x=slice(bounds[0], bounds[2]), y=slice(bounds[1], bounds[3]))
             
             _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/30/24*ds.dt # matching timestep of simulation
-            weight = xr.broadcast(_weight, ds.time)[0].fillna(0)
+            #weight = xr.broadcast(_weight, ds.time)[0].fillna(0)
             
-            ds['weight'] = weight
+            ds['weight'] = _weight
 
             #use grid from use file as `bins` to compute histogram. (but need to shift from center to get same coordinates)
             xbin = np.append(use.x - res/2, use.x[-1]+res/2)
@@ -446,9 +476,9 @@ class LagrangianDispersion(object):
         if decay_rate is not None:
             k = decay_rate #decay coefficient given by user
             y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function 
-            decay = xr.broadcast(y, ds.lon, exclude=['time'])[0]
-            ds['decay'] = decay  
-            ds['weight'] = weight*decay
+            #decay = xr.broadcast(y, ds.lon, exclude=['time'])[0]
+            ds['decay'] = y  
+            ds['weight'] = ds.weight*ds.decay
         else:
             pass
         
@@ -464,6 +494,9 @@ class LagrangianDispersion(object):
         
         # FILTER OUT PARTICLES WHERE WEIGHT IS 0 TO FREE UP MEMORY
         ds = ds.where(ds.weight!=0)
+        
+        self.ds = ds
+        
         
         # calculate histogram
         if self.depth == False:
@@ -506,13 +539,15 @@ class LagrangianDispersion(object):
         self.raster = r
 
         if save_to == 'tiff':
-            rpath = self.particle_path[:-3]+'_RASTER'+use_path[:-4]+'.tif'
-            r.rio.to_raster(data_path / 'rasters' / rpath)
+            rpath = list(self.particle_path.values())[0][:-3]+'_RASTER_'+use_path.split('/')[-1].split('.')[0]+'.tif'
+            r.rio.to_raster(self.basedir / 'rasters' / rpath)
         elif save_to == 'netcdf':
-            rpath = self.particle_path[:-3]+'_RASTER'+use_path[:-4]+'.nc'
-            r.to_netcdf(data_path / 'rasters' / rpath)
-        else:
+            rpath = list(self.particle_path.values())[0][:-3]+'_RASTER_'+use_path.split('/')[-1].split('.')[0]+'.nc'
+            r.to_netcdf(self.basedir / 'rasters' / rpath)
+        elif save_to is None:
             pass
+        else:
+            raise ValueError("'save_to', when specified, has to be one of 'tiff' ot 'netcdf'")
 
         elapsed = (T.time() - start_time)
         print("--- TOTAL RUNTIME %s seconds ---" % timedelta(minutes=elapsed/60))    
