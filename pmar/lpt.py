@@ -1,3 +1,4 @@
+import logging
 import rioxarray as rxr
 import numpy as np
 import xarray as xr
@@ -23,6 +24,13 @@ from matplotlib.ticker import LogFormatter, PercentFormatter
 from matplotlib import ticker
 import matplotlib.pyplot as plt
 import matplotlib.colors as col
+import os
+
+logger = logging.getLogger("LagrangianDispersion")
+
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
+
+DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
 class LagrangianDispersion(object): 
     """
@@ -65,7 +73,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self, basin, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', particle_path=None, depth=False):
+    def __init__(self, basin, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
         """
         Parameters
         ----------
@@ -79,6 +87,8 @@ class LagrangianDispersion(object):
             path to the netcdf file containing wind velocity data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.        
         mld_path : str, optional
             path to the netcdf file containing mixed layer depth data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.  
+        bathy_path : str
+            Path to bathymetry file to be used in 3D simulations. Default is None. An error is raised if depth is True and bathy_path is None. 
         particle_path : str, optional
             path to netcdf file containing output of OpenDrift simulation. Default is None. If a particle_path is given in initialisation,    
         depth : bool, optional
@@ -88,22 +98,27 @@ class LagrangianDispersion(object):
         if basin != 'med' and basin != 'bs':
             raise ValueError("Method is currently optimised for Med Sea and Black Sea only, thus 'basin' must be one of 'med' or 'bs'.")
         
+        if depth == True and bathy_path == None:
+                raise ValueError("Simulation is 3D but no bathymetry file was given. Please specify a bathy_path.")
+        
         self.basin = basin
         Path(basedir).mkdir(parents=True, exist_ok=True)
         self.uv_path = uv_path
         self.wind_path = wind_path
         self.mld_path = mld_path # so that one can also specify a local path to data file. default is 'cmems' meaning we stream the data from copernicus
+        self.bathy_path = bathy_path 
         self.basedir = Path(basedir)
         self.particle_path = particle_path
         
         if self.particle_path is not None: #take depth value from filename
-            self.depth = bool(self.particle_path.split('depth_')[1].split('.')[0])
+            self.depth = bool(self.particle_path.split('depth_')[1].split('.')[0])                   
+        elif self.bathy_path is not None:
+            self.depth = True
         else:
-            self.depth = depth
-            
+            self.depth = depth    
+        
         self.o = None
         self.poly_path = None # could give bath to full baisn as default
-        self.bathy_path = None # need to give path to gebco bathymetry as default 
         self.raster = None
         self.ds = None
         self.origin_marker = None
@@ -158,6 +173,9 @@ class LagrangianDispersion(object):
         if self.particle_path is not None:
             raise ValueError("Cannot use 'run' method if a 'particle_path' is already given. In this case, launch method 'particle_raster' directly.")
         
+
+        logger.debug('Run starting')
+
         
         # this gives the option of doing e.g. monthly runs to avoid crashing when seeding a lot of particles. 
         t0 = datetime.strptime(time[0], '%Y-%m-%d')
@@ -167,13 +185,14 @@ class LagrangianDispersion(object):
 
         
         for i in range(0, repeat_run):
-            t0 = t1
-            t1 = t0+iter_dt
-            
+
             self.origin_marker = i 
 
             self.particle_simulation(pnum=pnum, time=[t0.strftime('%Y-%m-%d'), t1.strftime('%Y-%m-%d')], res=res, crs=crs, lon=lon, lat=lat, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
             particle_list[i] = self.particle_path
+            
+            t0 = t1
+            t1 = t0+iter_dt
                 
         if len(particle_list) == 1:
             self.particle_path == list(particle_list.values())[0]
@@ -282,7 +301,6 @@ class LagrangianDispersion(object):
             Provide a higher value (e.g. 20) to receive less output.
         """
         
-        data_path = Path('/home/sbosi/data/')
         
         Path(self.basedir / 'particles').mkdir(parents=True, exist_ok=True)
         
@@ -294,7 +312,7 @@ class LagrangianDispersion(object):
             self.make_poly(lon, lat, crs=crs)
         else:
             if self.poly_path is None:
-                self.poly_path = f'/home/sbosi/data/polygons/polygon-{str(self.basin)}-full-basin.shp'
+                self.poly_path = f'{DATA_DIR}/polygon-{str(self.basin)}-full-basin.shp'
         
         bds = np.round(gpd.read_file(self.poly_path).total_bounds) # only used in particle_path
        
@@ -303,8 +321,8 @@ class LagrangianDispersion(object):
             DATASET_ID = f'{str(self.basin).replace("full_", "")}-cmcc-cur-rean-d' #ocean currents
             self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
         elif self.uv_path != 'cmems': 
-            uv_reader = reader_netCDF_CF_generic.Reader(self.uv_path)
-            self.o.add_reader(uv_reader) # add reader from local file
+            #uv_reader = reader_netCDF_CF_generic.Reader(self.uv_path)
+            self.o.add_readers_from_list(self.uv_path) # add reader from local file
         else: 
             raise ValueError('path to uv data file not recognised')
             
@@ -313,16 +331,14 @@ class LagrangianDispersion(object):
             WIND_ID = 'CERSAT-GLO-REP_WIND_L4-OBS_FULL_TIME_SERIE' #wind
             self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
         elif self.wind_path != 'cmems':
-            wind_reader = reader_netCDF_CF_generic.Reader(self.wind_path)
-            self.o.add_reader(wind_reader) # add reader from local file
+            #wind_reader = reader_netCDF_CF_generic.Reader(self.wind_path)
+            self.o.add_readers_from_list(self.wind_path) # add reader from local file
         else: 
             raise ValueError('path to wind data file not recognised')            
         
         # bathymetry, mixed layer depth (3D case)
         if self.depth == True:
-            # bathymetry (gebco)
-            bathy_file = 'bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
-            self.bathy_path = str(data_path / 'input' / bathy_file)
+            # bathymetry
             bathy_reader = reader_netCDF_CF_generic.Reader(self.bathy_path)
             self.o.add_reader(bathy_reader)
             
@@ -348,7 +364,7 @@ class LagrangianDispersion(object):
         # if a file with that name already exists, simply import it using OpenDrift import method. 
         if q.exists() == True:
             self.o.io_import_file(str(q))
-
+            ps = xr.open_mfdataset(q)
         # otherwise, run requested simulation
         elif q.exists() == False:
 
@@ -363,19 +379,21 @@ class LagrangianDispersion(object):
                 self.o.set_config('drift:vertical_mixing', True)
             
             else:
+                logger.debug(f'2D seeding from shapefile {self.poly_path}')
                 # if simulation is 2D, simply seed particles over polygon
                 self.o.seed_from_shapefile(str(self.poly_path), number=pnum, time=start_time, origin_marker=self.origin_marker)
             
             # run simulation and write to temporary file
-            self.o.run(end_time=end_time, time_step=time_step, outfile=str(self.basedir)+'/temp_particle_file.nc')
+            temp_outfile = str(self.basedir)+'/temp_particle_file.nc'
+            self.o.run(end_time=end_time, time_step=time_step, outfile=temp_outfile)
 
-        # open temporary file to handle 'inactive' particles (i.e. particles that have beached or gotten stuck on seafloor). 
-        # inactive particles are kept visible rather than deactivated, so they contribute to final count in particle_raster method. 
-        # new file is written with final filename given by particle_path.  
-        _ps = xr.open_dataset('temp_particle_file.nc')
-        ps = _ps.where(_ps.status==0).ffill('time') 
-        ps['dt'] = tstep #adding timestep to ds, will be useful later 
-        ps.to_netcdf(str(q)) 
+            # open temporary file to handle 'inactive' particles (i.e. particles that have beached or gotten stuck on seafloor). 
+            # inactive particles are kept visible rather than deactivated, so they contribute to final count in particle_raster method. 
+            # new file is written with final filename given by particle_path.  
+            _ps = xr.open_dataset(temp_outfile)
+            ps = _ps.where(_ps.status==0).ffill('time') 
+            ps['dt'] = tstep #adding timestep to ds, will be useful later 
+            ps.to_netcdf(str(q)) 
         
         self.ds = ps
         
@@ -416,7 +434,6 @@ class LagrangianDispersion(object):
         """
     
         start_time = T.time()
-        #data_path = Path('/home/sbosi/data/') # this will be deprecated
         Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
 
         
@@ -428,7 +445,7 @@ class LagrangianDispersion(object):
                 particle_path = self.particle_path
 
             #basin = particle_path.split('-',1)[0]
-            self.poly_path = self.poly_path = f'/home/sbosi/data/polygons/polygon-{str(self.basin)}-full-basin.shp'
+            self.poly_path = self.poly_path = f'/{DATA_DIR}/polygon-{str(self.basin)}-full-basin.shp'
         else:
             pass
 
