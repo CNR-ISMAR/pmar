@@ -27,13 +27,16 @@ import matplotlib.colors as col
 import os
 from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
-
+import random
+#from dask.distributed import Client
+#client = Client(n_workers=7, threads_per_worker=2)
 
 logger = logging.getLogger("LagrangianDispersion")
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
+
 
 class LagrangianDispersion(object): 
     """
@@ -66,20 +69,24 @@ class LagrangianDispersion(object):
         runs OpenDrift simulation
     particle_raster()
         computes 2D histogram of particle concentration and writes to tif (if requested)
-    plot_map()
+    plot()
         plots output of particle_raster()
+    scatter()
+        plots trajectories over time 
     animate()
         WIP
     
     """
     
     
-    def __init__(self, basin, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
+    def __init__(self, context, pressure='general', basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
         """
         Parameters
-        ----------
-        basin : str
-            Either one of 'med' for Mediterranean Sea or 'bs' for Black Sea. 
+        ---------- 
+        context : str
+            String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
+        pressure : str, optional
+            
         basedir : str, optional
             path to the base directory where all output will be stored. Default is to create a directory called 'lpt output' in the current directory.
         uv_path : str, optional
@@ -95,74 +102,129 @@ class LagrangianDispersion(object):
         depth : bool, optional
             boolean stating whether particle simulation is 2D (depth==False) or 3D (depth==True). Default is False
         """
-        # raise error if unsupported basin is requested
-        if basin != 'med' and basin != 'bs':
-            raise ValueError("Method is currently optimised for Med Sea and Black Sea only, thus 'basin' must be one of 'med' or 'bs'.")
-        
-        if depth == True and bathy_path == None:
-                raise ValueError("Simulation is 3D but no bathymetry file was given. Please specify a bathy_path.")
-        
-        self.basin = basin
+
         Path(basedir).mkdir(parents=True, exist_ok=True)
-        self.uv_path = uv_path
-        self.wind_path = wind_path
-        self.mld_path = mld_path # so that one can also specify a local path to data file. default is 'cmems' meaning we stream the data from copernicus
-        self.bathy_path = bathy_path 
+        self.uv_path = None
+        self.wind_path = None
+        self.mld_path = None 
+        self.bathy_path = None 
         self.basedir = Path(basedir)
-        self.particle_path = particle_path
-        
-        if self.particle_path is not None: #take depth value from filename
-            self.depth = bool(self.particle_path.split('depth_')[1].split('.')[0])                   
-        elif self.bathy_path is not None:
-            self.depth = True
-        else:
-            self.depth = depth    
-        
-        self.o = None
-        self.poly_path = None # could give bath to full baisn as default
-        self.raster = None
+        self.particle_path = particle_path # i can import an existing particle_path
         self.ds = None
+        self.o = None
+        self.poly_path = None 
+        self.raster = None
         self.origin_marker = 0
+        self.tstep = None
+        self.tseed = None
+        self.pnum = None
+        self.depth = depth
+        self.termvel = 0
+        self.decay_rate = 0
+        self.context = context
+        
+        pres_list = ['general', 'microplastic', 'bacteria']
+        pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
+                    data = {'pressure': pres_list, 
+                            'termvel': [0, 1e-3, 0], 
+                            'decay_rate': [0, 0, 1]})
+        
+        
+        if pressure is not None:
+            self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
+            self.decay_rate = pressures[pressures['pressure'] == f'{pressure}']['decay_rate'].values[0]
+    
+    
+        # if particle_path is given, retrieve attributes from filename and load ds
+        
+        if self.particle_path is not None: 
+            
+            avail_contexts = ['med', 'bs', 'bridge-bs', 'med-cmems', 'bs-cmems']
+            
+            for c in avail_contexts:
+                if c in self.particle_path:
+                    self.context = c
+                
+            self.depth = self.particle_path.split('depth_')[1][0] == 'T'  
+            
+            if self.particle_path.find('tseed') != -1:
+                self.tseed = timedelta(seconds=float(self.particle_path.split('tseed_')[1].split('s')[0]))
+            
+            self.tstep = timedelta(seconds=float(self.particle_path.split('tstep_')[1].split('s')[0]))
+            
+            self.pnum = int(self.particle_path.split('pnum_')[1].split('-')[0])
+            
+            # load opendrift dataset.  
+            if type(self.particle_path) == dict: 
+                for i in self.particle_path:
+                    path_list = self.particle_path
+                    path_list[i] = str(path_list[i])
+                
+                paths = path_list.values()
+            else:
+                paths = str(self.particle_path)
+            
+            ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
+
+            ds['trajectory'] = np.arange(0, len(ds.trajectory)) # give trajectories unique ID  
+    
+            self.ds = ds
+            
+            if self.ds.poly_path is not None:
+                self.poly_path = str(self.ds.poly_path)
+            
         pass
     
-    def run(self, pnum, time, repeat_run=1, res=0.04, crs='4326', lon=None, lat=None, z=-0.5, tstep=6, hdiff=10, termvel=1e-3, bounds=None, use_path='even_dist', decay_rate=0, depth_layer='water_column', z_bounds=[10,100], loglevel=20, save_to=None):         
+    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=False):         
         """
         Launches methods particle_simulation and particle_raster. 
         
         
         Parameters 
         ----------
-        pnum : int 
-            The number of particles to be seeded
-        time : list 
-            List of strings giving the time bounds (start time and end time) for the particle simulation
-        repeat_run = int, optional
+        reps = int, optional
             Number of desired iterations for the particle simulation. Default is 1
-        res : float, optional
-            Spatial resolution for raster in [deg]. Default is 0.04, which is ~4km
-        crs : str, optional
-            EPSG string for raster. Default is 4326
-        lon : list, optional
-            List giving two longitudinal bounds for particle seeding. Default is None (full basin)
-        lat : list, optional
-            List giving two latitudinal bounds for particle seeding. Default is None (full basin)
+        pnum : int, optional 
+            The number of particles to be seeded. Default is 100 (to be used for a test run)
+        start_time : str, optional
+            The start time of the simulation. Default is '2019-01-01' 
+        season : str, optional
+            Season in which simulation should be run. Defines start_time automatically. Default is None
+        duration_days : int, optional
+            Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
+        s_bounds : list, optional
+            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
         z : float, optional
             Depth at which to seed particles in [m]. Default is -0.5m. 
-        tstep : int, optional
-            Time step used for OpenDrift simulation, in hours. Default is 6
+        tstep : timedelta, optional
+            Time step used for OpenDrift simulation. Default is 6 hours
         hdiff : float, optional
-            Horizontal diffusivity particles. Default is 10m2/s
+            Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles. Default is 0.001m/s
-        bounds : list, optional
-            Spatial bounds for computation of histogram (raster) written as bounds=[x1,y1,x2,y2]. Default is None (full basin)
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0.001m/s
+        raster : bool, optional
+            Boolean stating whether to launch 'particle_raster' method. Default is True 
+        res : float, optional
+            Spatial resolution for raster in [m]. Default is 3km
+        crs : str, optional
+            EPSG string for raster. Default is 4326        
+        tinterp : float, optional
+            Timestep (in hours) used for interpolation of trajectories in particle_raster method. Default is None
+        r_bounds : list, optional
+            Spatial bounds for computation of histogram (particle_raster) written as bounds=[x1,y1,x2,y2]. Default is None (full basin)
         use_path : str, optional
             Path to .tif file representing density of human use of marine environment, used for 'weights' of particles in histogram calculation. 
-            If no use_path is given, a weight of 1 is given to all particles ('even_dist' for even distribution).
-        depth_layer : str, optional
-            Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
+            If no use_path is given, a weight of 1 is given to all particles ('even' for even distribution).
         decay_rate : float, optional
             Decay rate of particles in [days-1]. Default is 0
+        aggregate : str, optional
+            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
+        depth_layer : str, optional
+            Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
+        z_bounds : list, optional
+            Two parameters, given as z_bounds=[z_surface, z_bottom], determining the depth layers' thickness in [m]. 
+            The first represents vertical distance from the ocean surface (z=0), whhile the second represents vertical distance from the ocean bottom, given by the bathymetry. 
+            Default is z_bounds=[10,100].
         loglevel : int, optional
             OpenDrift loglevel. Set to 0 (default) to retrieve all debug information.
             Provide a higher value (e.g. 20) to receive less output.
@@ -170,44 +232,59 @@ class LagrangianDispersion(object):
             Filename to write raster figure to within the 'basedir' directory. 
         
         """
-        # raise error if particle_path is already given
-        if self.particle_path is not None:
-            raise ValueError("Cannot use 'run' method if a 'particle_path' is already given. In this case, launch method 'particle_raster' directly.")
+        # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
+        context = self.context 
         
-
-        logger.debug('Run starting')
-
+        if self.termvel is not None:
+            termvel = self.termvel
+         
+        if self.decay_rate is not None:
+            decay_rate = self.decay_rate
         
-        # this gives the option of doing e.g. monthly runs to avoid crashing when seeding a lot of particles. 
-        t0 = datetime.strptime(time[0], '%Y-%m-%d')
-        t1 = datetime.strptime(time[1], '%Y-%m-%d')
-        iter_dt = t1-t0
-        particle_list = {}
-        
-        for i in range(0, repeat_run):
-
-            self.origin_marker = i 
-
-            self.particle_simulation(pnum=pnum, time=[t0.strftime('%Y-%m-%d'), t1.strftime('%Y-%m-%d')], 
-                                     res=res, crs=crs, lon=lon, lat=lat, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
-            particle_list[i] = self.particle_path
-            
-            t0 = t1
-            t1 = t0+iter_dt
-                        
-        if len(particle_list) == 1:
-            self.particle_path == list(particle_list.values())[0]
-        else:
-            self.particle_path = particle_list
+        if self.particle_path is None:
+            #logger.debug('Run starting')
                 
+            self.pnum = pnum
+            # this gives the option of doing e.g. monthly runs to avoid crashing when seeding a lot of particles. 
+            #time = [t0.strftime('%Y-%m-%d'), t1.strftime('%Y-%m-%d')]
+            #iter_dt = t1-t0
+            particle_list = {}
+
+            # instead, split into smaller batches of particles (rather than time segments).
+            # repeat run gives the number of times that exact same run has to be repeated. this coefficient is saved in 'origin_marker', which now appears in particle_path. 
+            
+            ### di default, ogni run è shiftata di 28 giorni rispetto alla precedente (scelta empirica)
+            tshift = tshift
+            
+            for n in range(0, reps):
+                print(f'----- STARTING RUN #{n+1} -----')
+                if n==0:
+                    t0 = datetime.strptime(start_time, '%Y-%m-%d')
+                else:
+                    t0 = datetime.strptime(start_time, '%Y-%m-%d')+tshift
+
+                start_time = t0.strftime("%Y-%m-%d")
+                
+                self.origin_marker = n 
+                
+                self.particle_simulation(pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
+                particle_list[n] = self.particle_path
+                print(f'----- DONE WITH RUN #{n+1} -----')
+
+            
+            if len(particle_list) == 1:
+                self.particle_path == list(particle_list.values())[0]
+            else:
+                self.particle_path = particle_list
+
         # compute raster
-        self.particle_raster(res=res, crs=crs, tstep=tstep, bounds=bounds, use_path=use_path, decay_rate=decay_rate, depth_layer=depth_layer, z_bounds=z_bounds, save_to=save_to)
-        
+        if raster == True:
+            self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, save_to=save_to, plot=plot)
         
         return self
     
     
-    def make_poly(self, lon, lat, crs='4326'):
+    def make_poly(self, lon, lat, crs='4326', write=True):
         """
         Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile. 
         
@@ -217,13 +294,15 @@ class LagrangianDispersion(object):
             Either a list giving 2 bounds or an array of lon coordinates.
         lat : list or array
             Either a list giving 2 bounds or an array of lat coordinates.
-        crs : str
+        crs : str, optional
             EPSG string for Polygon crs. Default is '4326'
+        write : bool, optional
+            Whether to save the polygon as a shapefile in the 'polygons' directory. Default is True
         """
         
         
         Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-        poly_path = f'polygon-crs_epsg:{crs}.shp'
+        poly_path = f'polygon-crs_epsg:{crs}-lon_{lon[0]}_{lon[1]}-lat—{lat[0]}_{lat[1]}.shp'
         q = self.basedir / 'polygons' / poly_path
         
         if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
@@ -256,13 +335,15 @@ class LagrangianDispersion(object):
         else:
             raise ValueError("'lon' and 'lat' must have lenght larger than 2")
         
-        poly.to_file(str(q), driver='ESRI Shapefile')
-        self.poly_path = q
-        pass
+        if write is True:
+            poly.to_file(str(q), driver='ESRI Shapefile')
+            self.poly_path = str(q)
+        else:
+            return poly
     
 
     
-    def particle_simulation(self, pnum, time, res=0.04, crs='4326', lon=None, lat=None, z=-0.5, tstep=6, hdiff=10, termvel=1e-3, loglevel=20):
+    def particle_simulation(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, crs='4326', loglevel=40):
         """
         Method to start a trajectory simulation, after initial configuration, using OpenDrift by MET Norway.
         Uses OceanDrift module. 
@@ -275,150 +356,266 @@ class LagrangianDispersion(object):
         
         Parameters
         ----------
+        context : str
+            String defining the context of the simulation i.e., the model data to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
         pnum : int 
             The number of particles to be seeded
-        time : list 
-            List of strings giving the time bounds (start time and end time) for the particle simulation
-        res : float, optional
-            Spatial resolution for raster in [deg]. Default is 0.04, which is ~4km
-        crs : str, optional
-            EPSG string for raster. Default is 4326
-        lon : list, optional
-            List giving two longitudinal bounds for particle seeding. Default is None (full basin)
-        lat : list, optional
-            List giving two latitudinal bounds for particle seeding. Default is None (full basin)
+        start_time : str, optional
+            The start time of the simulation. Default is '2019-01-01'
+        season : str, optional
+            Season in which simulation should be run. Defines start_time automatically. Default is None
+        duration_days : int, optional
+            Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
+        s_bounds : list, optional
+            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
         z : float, optional
             Depth at which to seed particles in [m]. Default is -0.5m. 
-        tstep : int, optional
-            Time step used for OpenDrift simulation, in hours. Default is 6
+        tstep : timedelta, optional
+            Time step used for OpenDrift simulation. Default is 6 hours
         hdiff : float, optional
-            Horizontal diffusivity particles. Default is 10m2/s
+            Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles. Default is 0.001m/s
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0.001m/s            
+        crs : str, optional
+            EPSG string for polygon. Default is 4326   
         loglevel : int, optional
             OpenDrift loglevel. Set to 0 (default) to retrieve all debug information.
             Provide a higher value (e.g. 20) to receive less output.
         """
+        t_0 = T.time()   
         
+        context = self.context 
+
+        
+        if self.termvel is not None:
+            termvel = self.termvel
+         
+        if self.decay_rate is not None:
+            decay_rate = self.decay_rate
+        
+        
+        # raise error if unsupported context is requested
+        avail_contexts = ['bridge-bs', 'med-cmems', 'bs-cmems']
+        if context not in avail_contexts:
+            raise ValueError(f"Unsupported context given. Context variable must be one of {avail_contexts}")
+        self.context = context
         
         Path(self.basedir / 'particles').mkdir(parents=True, exist_ok=True)
         
-        self.o = OceanDrift(loglevel=loglevel) # initialise OpenDrift object
+        ### time settings ####
+        ssns = {'summer': datetime(2019,6,1),
+               'winter': datetime(2019,12,1),
+               'spring': datetime(2019,3,1),
+               'autumn': datetime(2019,9,1)}
+
+        if season in ssns.keys():
+            start_time = ssns[season]  
+        else:
+            start_time = datetime.strptime(start_time, '%Y-%m-%d')
+        end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
+        time_step = tstep
+
+        if self.tseed is None:
+            self.tseed = timedelta(days=int(duration_days * 20 / 100)) #tseed is 20% of total duration
+            
+        tseed = self.tseed
         
+        duration = timedelta(days=duration_days)+tseed-timedelta(days=1) # true duration of the run. the tseed time period is then deleted.
+        
+        self.tstep = tstep
         
         # polygon used for seeding of particles. by default, it is the whole basin. but if lon and lat are given, a new polygon is created using those bounds. 
-        if lon is not None and lat is not None:
+        if s_bounds is not None:
+            lon = s_bounds[0::2]
+            lat = s_bounds[1::2]
             self.make_poly(lon, lat, crs=crs)
         else:
             if self.poly_path is None:
-                self.poly_path = f'{DATA_DIR}/polygon-{str(self.basin)}-full-basin.shp'
+                if 'med' in self.context:
+                    self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
+                elif 'bs' in self.context:
+                    self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
+                else:
+                    raise ValueError('No polygon could be identified for seeding.')
         
+        # path to write particle simulation file. also used for our 'cache'        
         bds = np.round(gpd.read_file(self.poly_path).total_bounds) # only used in particle_path
-       
-        # stream data from Copernicus CMEMS (currents, wind)
-        if self.uv_path == 'cmems':
-            if self.basin == 'med':
-                DATASET_ID = 'med-cmcc-cur-rean-d' #ocean currents med
-            elif self.basin == 'bs':
-                DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m' # ocean currents bs
-            else:
-                raise ValueError("basin not recognised. Must be one of 'med' or 'bs'")
-            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
-        elif self.uv_path != 'cmems': 
-            #uv_reader = reader_netCDF_CF_generic.Reader(self.uv_path)
-            self.o.add_readers_from_list(self.uv_path) # add reader from local file
-        else: 
-            raise ValueError('path to uv data file not recognised')
-            
-            
-        if self.wind_path == 'cmems':
-            WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' #wind
-            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
-        elif self.wind_path != 'cmems':
-            wind_reader = reader_netCDF_CF_generic.Reader(self.wind_path)
-            self.o.add_readers_from_list(self.wind_path) # add reader from local file
-        else: 
-            raise ValueError('path to wind data file not recognised')            
-        
-        # bathymetry, mixed layer depth (3D case)
-        if self.depth == True:
-            # bathymetry
-            bathy_reader = reader_netCDF_CF_generic.Reader(self.bathy_path)
-            self.o.add_reader(bathy_reader)
-            
-            if self.mld_path == 'cmems':
-                # mixed layer depth (cmems)
-                mld_ID = f'{str(self.basin)}-cmcc-mld-rean-d'
-                self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{mld_ID}'])
-            elif self.mld_path != 'cmems':
-                mld_reader = reader_netCDF_CF_generic.Reader(self.mld_path)
-                self.o.add_reader(mld_reader) # add reader from local file
-            else: 
-                raise ValueError('path to mld data file not recognised') 
-        
-        # time step and time range for simulation (user-defined)
-        time_step = timedelta(hours=tstep)
-        start_time = datetime.strptime(time[0], '%Y-%m-%d') 
-        end_time = datetime.strptime(time[1], '%Y-%m-%d') 
-        
-        # path to write particle simulation file. used for our 'cache'
-        particle_path = f'{str(self.basin)}-lon_{int(bds[0])}-{int(bds[2])}_lat_{int(bds[1])}-{int(bds[3])}-pnum_{pnum}-time_{time[0]}_to_{time[1]}-tstep_{tstep}hrs-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}.nc'
+        t0 = start_time.strftime('%Y-%m-%d')
+        t1 = end_time.strftime('%Y-%m-%d')
+        particle_path = f'{str(self.context)}-lon_{int(bds[0])}-{int(bds[2])}_lat_{int(bds[1])}-{int(bds[3])}-time_{t0}_to_{t1}-pnum_{pnum}-tstep_{int(tstep.total_seconds())}s-tseed_{int(self.tseed.total_seconds())}s-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}-marker_{str(self.origin_marker)}.nc'
         q =  self.basedir / 'particles' / particle_path
-            
-        # if a file with that name already exists, simply import it using OpenDrift import method. 
+        
+        
+        # initialise OpenDrift object
+        self.o = OceanDrift(loglevel=loglevel) 
+
+        # if a file with that name already exists, simply import it  
         if q.exists() == True:
-            self.o.io_import_file(str(q))
+            #self.o.io_import_file(str(q)) # this is sometimes too heavy
             ps = xr.open_mfdataset(q)
             print('NOTE: File with these configurations already exists within basedir and has been imported. Please delete the existing file to produce a new simulation.')
+
         # otherwise, run requested simulation
         elif q.exists() == False:
-            
+            print('adding landmask...')
             # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
             shpfilename = shpreader.natural_earth(resolution='10m',
                                     category='cultural',
                                     name='admin_0_countries')
-            reader_natural = reader_shape.Reader.from_shpfiles(shpfilename)
-
-            self.o.add_reader([reader_natural])
-            self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
-            self.o.set_config('general:coastline_action', 'stranding')
+            reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
             
-            # horizontal diffusivity
-            self.o.set_config('drift:horizontal_diffusivity', hdiff)    
+            # opendrift landmask
+            #from opendrift.readers import reader_global_landmask
+            #reader_landmask = reader_global_landmask.Reader()
+            #           extent=[2, 59, 8, 63]) #can also specify extent if needed
+            
+            self.o.add_reader([reader_landmask])
+            self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
+            
+            # import relevant readers based on context
+            if context == 'bridge-bs': # local WP2 data
+                
+                dates = pd.date_range(start_time.strftime("%Y-%m"),(start_time+duration).strftime("%Y-%m"),freq='MS').strftime("%Y-%m").tolist()
+                
+                uvpaths={}
+                mldpaths={}
+                windpaths = {}
+
+                for idx, d in enumerate(dates):
+                    date = d.replace('-', '')
+                    uvpaths[idx] = f'/home/sbosi/data/processed_BRIDGE_WP2/BS_1d_{date}*UV.nc'
+                    mldpaths[idx] = f'/home/sbosi/data/processed_BRIDGE_WP2/BS_1d_{date}*MLD.nc'   
+                
+                uv_path = list(uvpaths.values())
+                mld_path = list(mldpaths.values())
+                
+                for i in range(start_time.year, end_time.year+1):
+                    windpaths[i] = f'/home/sbosi/data/BRIDGE-WP2/era5_y{i}.nc'
+                
+                wind_path = list(windpaths.values())
+                bathy_path = '/home/sbosi/data/BRIDGE-WP2/bs_bathymetry.nc'
+                
+            elif context == 'bs-cmems': # copernicus Black Sea data (stream)
+                DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m' 
+                uv_path = f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'
+                
+                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' 
+                wind_path = f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
+                
+                mld_ID = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'#'bs-cmcc-mld-rean-d'
+                mld_path = f'https://my.cmems-du.eu/thredds/dodsC/{mld_ID}'        
+                
+                bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
+            
+            elif context == 'med-cmems': # copernicus Med Sea data (stream)
+                DATASET_ID = 'med-cmcc-cur-rean-d' 
+                uv_path = f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
+                
+                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
+                wind_path = f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
+            
+                mld_ID = 'med-cmcc-mld-rean-d'
+                mld_path = f'https://my.cmems-du.eu/thredds/dodsC/{mld_ID}'      
+                
+                bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
+
+            else:
+                raise ValueError("Unsupported context. Please choose one of 'bridge-bs', 'bs-cmems' or 'med-cmems'.")
+
+            print('adding ocean readers...')
+            self.o.add_readers_from_list(uv_path, lazy=True) 
+            print('adding wind readers...')
+            self.o.add_readers_from_list(wind_path, lazy=True) # add reader from local file
             
             if self.depth == True:
-                # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
-                self.o.set_config('seed:terminal_velocity', termvel)
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=start_time, terminal_velocity=termvel, z=z, origin_marker=self.origin_marker)
+                print('adding mixed layer readers...')
+                self.o.add_readers_from_list(mld_path, lazy=True) # add reader from local file
+                print('adding bathymetry readers...')
+                bathy_reader = reader_netCDF_CF_generic.Reader(bathy_path)
+                self.o.add_reader(bathy_reader)
+
+            # some OpenDrift configurations
+            self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
+            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            
+            # uncertainty
+            #self.o.set_config('drift:current_uncertainty', .1)
+            #self.o.set_config('drift:wind_uncertainty', 1)
+
+            ##### SEEDING #####
+            print('seeding particles...')
+            np.random.seed(None) # to avoid seeding in same exact position each time             
+
+            # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
+            if self.depth == True:
+                self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
+                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time+self.tseed], 
+                                           terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=1e4)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
                 self.o.set_config('drift:vertical_mixing', True)
             
+            # if simulation is 2D, simply seed particles over polygon
             else:
-                logger.debug(f'2D seeding from shapefile {self.poly_path}')
-                # if simulation is 2D, simply seed particles over polygon
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=start_time, origin_marker=self.origin_marker)
+                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time+self.tseed],
+                                           origin_marker=self.origin_marker, radius=1e4)
             
             # run simulation and write to temporary file
             temp_outfile = str(self.basedir)+'/temp_particle_file.nc'
-            self.o.run(end_time=end_time, time_step=time_step, outfile=temp_outfile)
+            
+            now = datetime.now()
+            current_time = now.strftime("%H:%M:%S")
 
-            # open temporary file to handle 'inactive' particles (i.e. particles that have beached or gotten stuck on seafloor). 
-            # inactive particles are kept visible rather than deactivated, so they contribute to final count in particle_raster method. 
-            # new file is written with final filename given by particle_path.  
-            _ps = xr.open_dataset(temp_outfile)
-            ps = _ps.where(_ps.status==0).ffill('time') 
-            ps['dt'] = tstep #adding timestep to ds, will be useful later 
+            #print(f'starting OpenDrift run at {current_time}...')
+            
+            self.o.run(duration=duration, #end_time=end_time, 
+                       time_step=time_step, #time_step_output=timedelta(hours=24), 
+                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'sea_floor_depth_below_sea_level', 'age_seconds', 'origin_marker', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind', 'ocean_mixed_layer_thickness'])
+            
+            elapsed = (T.time() - t_0)
+            print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
+
+            #### A BIT OF POST-PROCESSING ####
+            print('writing to netcdf...')
+            
+            _ps = xr.open_dataset(temp_outfile) # open temporary file
+            
+            # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
+            ps = _ps.where(_ps.status>=0).ffill('time') 
+            
+            # align trajectories by particles' age
+            shift_by = -ps.age_seconds.argmin('time') 
+            if self.tseed.days!=0: 
+
+                def shift_by_age(da, shift_by):
+                    newda = xr.apply_ufunc(np.roll, da, shift_by, input_core_dims=[['time'], []], output_core_dims=[['time']], vectorize=True, dask='parallelized', keep_attrs='drop_conflicts')
+                    return newda
+
+                ps=ps.apply(shift_by_age, shift_by=shift_by) 
+
+                # remove tail of nan values
+                _idx = ps.age_seconds.argmin('time', skipna=False)
+                idx = _idx.where(_idx!=0).min() # time index of first nan value across all trajectories
+                ps = ps.isel(time=slice(None, int(idx)))
+            
+            # write useful time attributes
+            ps = ps.assign_attrs({'tseed': self.tseed.total_seconds(), 'tstep': tstep.total_seconds(), 'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)})
+            #self.tstep = tstep
+            #self.tseed = tseed # should already be there
+            
             ps.to_netcdf(str(q)) 
         
         self.ds = ps
         
         self.particle_path = str(q) #particle_path
-
+        
+        print('done.')
+        
         pass     
     
 
-    def particle_raster(self, res=0.04, crs='4326', tstep=None, bounds=None, use_path='even_dist', decay_rate=0, depth_layer='full_depth', z_bounds=[10,100], save_to=None):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], save_to=None, plot=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -429,18 +626,21 @@ class LagrangianDispersion(object):
         Parameters
         ----------
         res : float, optional
-            Spatial resolution for raster in [deg]. Default is 0.04, which is ~4km
+            Spatial resolution for raster in [m]. Default is 3km
         crs : str, optional
             EPSG string for raster. Default is 4326
-        tstep : int, optional
-            New timestep used for interpolation. 
-        bounds : bounds, optional
-            Spatial bounds for computation of histogram (raster) written as bounds=[x1,y1,x2,y2]. Default is None (full basin)
+        tinterp : float, optional
+            Timestep (in hours) used for interpolation of trajectories in particle_raster method. Default is None
+            ds
+        r_bounds : bounds, optional
+            Spatial bounds for computation of raster written as bounds=[x1,y1,x2,y2]. Default is None (bounds are taken from self.poly_path)
         use_path : str, optional
             Path to file representing density of human use, used for 'weights' of particles in histogram calculation. 
-            If no use_path is given, a weight of 1 is given to all particles. Default is None
+            If no use_path is given, a weight of 1 is given to all particles by default ('even').
         decay_rate : float, optional
             Decay rate of particles in [days-1]. Default is 0
+        aggregate : 
+            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
         depth_layer : str, optional
             Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
         z_bounds : list, optional
@@ -449,87 +649,99 @@ class LagrangianDispersion(object):
             Filename to write raster figure to within the 'basedir' directory. 
         """
     
-        t0 = T.time()
+        t_0 = T.time()
         Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
-
         
-        ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
-        if self.poly_path is None:
-            if type(self.particle_path) != str:
-                particle_path = self.particle_path[1]
-            else:
-                particle_path = self.particle_path
-
-            #basin = particle_path.split('-',1)[0]
-            self.poly_path = self.poly_path = f'/{DATA_DIR}/polygon-{str(self.basin)}-full-basin.shp'
-        else:
-            pass
-
+        if self.termvel is not None:
+            termvel = self.termvel
+         
+        if self.decay_rate is not None:
+            decay_rate = self.decay_rate
+        
+        ### copied this section to __init__, if particle_path is not None
+        # load opendrift dataset 
+        #if self.ds is None:
         if type(self.particle_path) == dict: 
             for i in self.particle_path:
                 path_list = self.particle_path
                 path_list[i] = str(path_list[i])
-            
-            _ds = xr.open_mfdataset(path_list.values(), concat_dim='trajectory', combine='nested', join='outer').isel(time=slice(1,None)).chunk({'trajectory': 10000, 'time':1000}) # removing time 0 
+
+            paths = path_list.values()
         else:
-            #q = self.basedir / list(self.particle_path)[0]
-            _ds = xr.open_mfdataset(str(self.particle_path), concat_dim='trajectory', combine='nested', join='outer').isel(time=slice(1,None)).chunk({'trajectory': 10000, 'time':1000}) # removing time 0
+            paths = str(self.particle_path)
+                
+        _ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
 
-        
-        _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID
+        _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID            
+        self.ds = _ds
+        #else:
+         #   _ds = self.ds
+            
+            
+        ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
+        if self.poly_path is None:
+            if self.ds.poly_path is not None:
+                self.poly_path = str(self.ds.poly_path)
+            elif 'med' in self.context:
+                self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
+            elif 'bs' in self.context:
+                self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
+            else:
+                raise ValueError("No polygon could be extracted from particle_path. Please provide 'self.poly_path' manually.")
+        else:
+            pass
 
 
-        # if new timestep is given in raster request, interpolate dataset to fill in gaps
-        if tstep is not None:
-            new_time = np.arange(pd.to_datetime(_ds.time[0].values), pd.to_datetime(_ds.time[-1].values),timedelta(hours=tstep)) #new time variables used for interpolation
-            ds = _ds.interp(time=new_time) # interpolate dataset 
-            ds['dt'] = tstep
+        ### TIME INTERPOLATION ###
+        if tinterp is not None:
+            new_time = np.arange(pd.to_datetime(_ds.time[0].values), pd.to_datetime(_ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
+            ds = _ds.interp(time=new_time, method='slinear') # interpolate dataset 
+            ds['tinterp'] = tinterp
         else:
             ds = _ds
             
 
         ### BINS ### 
-        if bounds is None:
+        
+        # this polygon is only used to extract bounds for construction of bins in the case of an 'even' use distribution.
+        if r_bounds is not None:
+            poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False)
+        else:    
             poly = gpd.read_file(self.poly_path)
-            bounds = poly.total_bounds
-        else:
-            pass
-
-        # if no use path is given, take resolution and polybounds (works even if it is full basin) and calculate bins this way. 
-        if use_path == 'even_dist':
-            # all particles have weight 1
-            weight = np.ones((ds.lon.shape))
+            r_bounds = poly.total_bounds
+           
+        # if no use path is given, compute bins from resolution and bounds of polygon
+        if use_path == 'even':
+            weight = np.ones((ds.lon.shape))             # all particles have weight 1
             ds = ds.assign({'weight': (('trajectory', 'time'), weight)}, )
-            # bins are calculated from given res and bounds
-            xbin = np.arange(bounds[0],bounds[2]+res,res)
-            ybin = np.arange(bounds[1],bounds[3]+res,res)
+            xbin = np.arange(r_bounds[0],r_bounds[2]+res/1e5,res/1e5) # factor 1e5 is to approximately convert m to latlon deg
+            ybin = np.arange(r_bounds[1],r_bounds[3]+res/1e5,res/1e5)
+
         else: 
-        #create `weight` variable from value of `use` at starting positions of particles
-            use = rxr.open_rasterio(use_path).isel(band=0).rio.reproject('epsg:'+str(crs), resolution=res, nodata=0).drop('band').squeeze().sortby('x').sortby('y').sel(x=slice(bounds[0], bounds[2]), y=slice(bounds[1], bounds[3]))
+            _use = rxr.open_rasterio(use_path).sortby('x').sortby('y').isel(band=0).drop('band')
+            spatial_ref = _use.spatial_ref.crs_wkt
+            bds_reproj = poly.to_crs(spatial_ref).total_bounds 
+            #create `weight` variable from value of `use` at starting positions of particles
             
-            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/30/24*ds.dt # matching timestep of simulation
-            #weight = xr.broadcast(_weight, ds.time)[0].fillna(0)
+            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y')
+            
+            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/30/24/60/60*self.tstep.total_seconds()   # matching timestep of simulation ### NEED TO GENERALISE
             
             ds['weight'] = _weight
 
             #use grid from use file as `bins` to compute histogram. (but need to shift from center to get same coordinates)
-            xbin = np.append(use.x - res/2, use.x[-1]+res/2)
-            ybin = np.append(use.y - res/2, use.y[-1]+res/2) 
+            #xbin = np.append(use.x - res/2, use.x[-1]+res/2)
+            #ybin = np.append(use.y - res/2, use.y[-1]+res/2) 
+            # res is now given in m
+            xbin = np.append(use.x - np.diff(use.x).mean()/2, use.x[-1]+np.diff(use.x).mean()/2)
+            ybin = np.append(use.y - np.diff(use.y).mean()/2, use.y[-1]+np.diff(use.y).mean()/2) 
             
-        #print('weight no decay', ds.weight)
-        
         ### DECAY RATE ####
-#        if decay_rate is not None:
         k = decay_rate #decay coefficient given by user
         y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function 
-        decay = xr.broadcast(y, ds.lon, exclude=['time'])[0]
         ds['decay'] = y  
         ds['weight'] = ds.weight*ds.decay
- #       else:
-  #          pass
-        
-        #print('weight after decay', ds.weight)
-        
+
         #### HISTOGRAMS. 2 CASES: 2D or 3D ####
         if self.depth is None:
             if len(np.unique(ds.z)) > 2:
@@ -539,46 +751,59 @@ class LagrangianDispersion(object):
         else:
             pass
         
-        # FILTER OUT PARTICLES WHERE WEIGHT IS 0 TO FREE UP MEMORY
-        ds = ds.where(ds.weight!=0)
-        
-        self.ds = ds
-        
-        
-        # calculate histogram
-        if self.depth == False:
-            # compute histogram for each timestep
-            _h = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=ds.weight)#, density=True)
+        # FILTER OUT PARTICLES WHERE WEIGHT IS 0 TO FREE UP MEMORY.
+        # NB: filter out entire TRAJECTORIES of particles which are released in cells where use layer is 0. this is done by extracting their particle ID. 
+        p_id = ds.isel(time=0).where(ds.weight.isel(time=0)!=0).trajectory.data
+        ds = ds.sel(trajectory=p_id).dropna('trajectory', 'all')
             
         # 3D
-        elif self.depth == True:
+        if self.depth == True:
             ds = ds.assign(depth=-ds.z)
+            # condition to filter out ds based on depth_layer
+            cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
             
-            # in 3D case, in addition to merge alg we also have options for vertical layers
-            if depth_layer == 'surface':
-                surface = ds.where(ds.depth<=z_bounds[0])
-                _h = histogram(surface.lon, surface.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=surface.weight)
+            if depth_layer in cond.keys():
+                ds = ds.where(cond[depth_layer])
                 
-            elif depth_layer == 'seafloor':
-                seafloor = ds.where(ds.depth>(ds.sea_floor_depth_below_sea_level-z_bounds[1]))
-                _h = histogram(seafloor.lon, seafloor.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=seafloor.weight)
-            
-            elif depth_layer == 'water_column':
-                column = ds.where(np.logical_and(ds.depth>z_bounds[0], ds.depth<z_bounds[1]))
-                _h = histogram(column.lon, column.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=column.weight)            
-            
-            elif depth_layer == 'full_depth':
-                _h = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=ds.weight)
-            
-            else:
-                raise ValueError('"depth_layer" must be one of "full_depth", "surface", "seafloor" or "water_column"')    
-        
+        elif self.depth == False:
+            pass
         else:
             raise ValueError('cannot detect whether 2D or 3D')
-            
-        h = _h.transpose()
+        
+        self.ds = ds
 
+        
+        ### chunking + aggregation method (sum, max, etc)
+        step = 100 # this is completely arbitrary for now
+        slices = int(len(ds.time)/step) # numer of slices / chunks
+        
+        ### need to rewrite this and make it cleaner (maybe use .exec()?), but for now:
+        #### AGGREGATION METHOD ####
+        qtemp = str('tempfiles'+"{:05d}".format(random.randint(0,99999)))
+        Path(self.basedir / qtemp).mkdir(parents=True, exist_ok=True)
+        
+        if aggregate == 'sum':
+            for i in range(0,slices+1):
+                d = ds.isel(time=slice(step*i,step+step*i))
+                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
+                hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
+                del hh, d
+
+            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='time', combine='nested').sum('time').histogram_lon_lat
             
+        elif aggregate == 'max': 
+            for i in range(0,slices+1):
+                d = ds.isel(time=slice(step*i,step+step*i))
+                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).max('time')
+                hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
+                del hh, d
+
+            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='time', combine='nested').max('time').histogram_lon_lat
+        else:
+            raise ValueError("'aggregate' must be one of 'sum' or 'max'.")
+        
+        h = _h.transpose()
+                
         # write geo information to xarray and save as geotiff
         r = (
             xr.DataArray(h) # need to transpose it because xhistogram does that for some reason
@@ -586,27 +811,38 @@ class LagrangianDispersion(object):
             .rio.write_crs('epsg:'+str(crs))
             .rio.write_coordinate_system())
 
-        self.raster = r
+        #self.raster = r
+        
+        r=r.assign_attrs({'use_path': use_path}).to_dataset()
 
-        if save_to is not None:
-            #rpath = list(self.particle_path.values())[0][:-3]+'_RASTER_'+use_path.split('/')[-1].split('.')[0]+'.tif'
+        #### SAVING RASTERS INTO CLASS INSTANCE SO I DONT HAVE TO RECALCULATE THEM EVERY TIME #### 
+        if self.raster is None:
+            self.raster = r.rename({'histogram_lon_lat': 'r'})
+        else:
+            self.raster = xr.merge([self.raster, r.rename({'histogram_lon_lat': f'r{len(self.raster)}', 'lon_bin': f'lon_bin_{len(self.raster)}', 'lat_bin': f'lat_bin_{len(self.raster)}'})], compat='broadcast_equals', join='outer', fill_value=0, combine_attrs='no_conflicts')
+        
+        
+        # save final raster to netcdf, delete temporary files
+        if save_to is None:
+            pass
+        else:
             r.rio.to_raster(self.basedir / 'rasters' / save_to)
-        #elif save_to == 'netcdf':
-         #   rpath = list(self.particle_path.values())[0][:-3]+'_RASTER_'+use_path.split('/')[-1].split('.')[0]+'.nc'
-          #  r.to_netcdf(self.basedir / 'rasters' / rpath)
+        
+        # remove temporary files
+        for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
+            p.unlink()
+        
+        elapsed = (T.time() - t_0)
+        print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))    
+        
+        if plot is True:
+            return self.plot()
         else:
             pass
-        #else:
-         #   raise ValueError("'save_to', when specified, has to be one of 'tiff' ot 'netcdf'")
-
-        elapsed = (T.time() - t0)
-        print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))    
-
-        pass
     
-    
-    def plot_map(self, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7]):
+    def plot(self, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None):
         """
+        Plot particle_raster outputs.
         
         Parameters
         ----------
@@ -659,7 +895,9 @@ class LagrangianDispersion(object):
         dpi : float, default: :rc:`figure.dpi`
             The resolution of the figure in dots-per-inch.
         figsize : tuple, optional
-            A tuple (width, height) of the figure in inches.        
+            A tuple (width, height) of the figure in inches.   
+        rivers : bool, optional
+            Whether to plot rivers. Default is False
         """
         
         
@@ -667,27 +905,127 @@ class LagrangianDispersion(object):
         MEDIUM_SIZE = 10
         BIGGER_SIZE = 16
         
+        if self.raster is None: 
+            raise ValueError("No raster has been calculated yet. Please launch particle_raster method first.")
+        
+        for r in self.raster.data_vars: # plot all available rasters
+            
+            fig = plt.figure(figsize=figsize)
+            ax = plt.axes(projection=proj)
+            ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
+            ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=10) #'#FFE9B5'
+            ax.add_feature(cartopy.feature.BORDERS, zorder=10, linewidth=.5, linestyle=':')
+            if rivers is True:
+                ax.add_feature(cartopy.feature.RIVERS, zorder=12)
+            gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
+            gl.top_labels = False
+            gl.right_labels = False    
+
+            #r = self.raster#.where(self.raster>0, 1e-30)
+            im = self.raster[f'{r}'].where(self.raster[f'{r}']!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
+            cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
+            cbar = plt.colorbar(im, cax=cax, extend='max')
+            cbar.set_label('particles/gridcell', rotation=90)
+            
+            if title is not None:
+                ax.set_title(title+'\n use_path: '+self.raster[f'{r}'].use_path, fontsize=12)
+            else:
+                ax.set_title('use_path: '+self.raster[f'{r}'].use_path, fontsize=8)
+
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+
+
+            plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
+            plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
+            plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
+            plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+            plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+            plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
+            plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+
+            #return fig, ax
+
+    
+    def scatter(self, t=None, xlim=None, ylim=None, s=1, c='age', cmap='viridis', coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False):
+        """
+        Visualise particle trajectories over time [days elapsed], defined by age_seconds. 
+        
+        
+        Parameters
+        ----------
+        t : int, optional
+            If a t is given, the scatter plot will represent the selected instant in time (int) or time interval (slice). Otherwise, it will show the entire trajectory (default). 
+        xlim, ylim : array-like, optional
+            Specify *x*- and *y*-axis limits.
+        s : float, optional
+            Marker size for scatter plot. Default is 1
+        c : str, optional
+            String defining variable used for colormap. Options are 'z' or 'age' (Default)
+        cmap : matplotlib colormap name or colormap, optional
+            Plot colormap. Default is seaborn's 'spectral' map, reversed. 
+        coastres : str or :class:`cartopy.feature.Scaler`, optional
+            A named resolution to use from the Natural Earth
+            dataset. Currently can be one of "auto" (default), "110m", "50m",
+            and "10m", or a Scaler object.
+        proj : {None, 'aitoff', 'hammer', 'lambert', 'mollweide', 'polar', 'rectilinear', str}, optional
+            The projection type of the `~.axes.Axes`. *str* is the name of
+            a custom projection, see `~matplotlib.projections`. The default
+            None results in a 'rectilinear' projection.
+            Default is cartopy.crs.PlateCarree().
+        dpi : float, default: :rc:`figure.dpi`
+            The resolution of the figure in dots-per-inch.
+        figsize : tuple, optional
+            A tuple (width, height) of the figure in inches.   
+        rivers : bool, optional
+            Whether to plot rivers. Default is False
+        """        
+        
+        O = np.floor(np.log10(len(self.ds.time)))
+        
+        if t is None:
+            if O >= 3:
+                ds = self.ds.isel(time=slice(None,None,int(len(self.ds.time)/10**(O-2))))
+            else:
+                ds = self.ds
+        else:
+            ds = self.ds.isel(time=t)
+        
+        
+        if c == 'age': 
+            c = ds.age_seconds/60/60/24
+            cmap = 'rainbow' #'copper'
+            cbar_label = 'elapsed days'
+        elif c == 'z':
+            c = ds.z
+            cmap = 'viridis'
+            cbar_label = 'depth [m]'
+        
+        SMALL_SIZE = 8
+        MEDIUM_SIZE = 10
+        BIGGER_SIZE = 16
+        
         fig = plt.figure(figsize=figsize)
         ax = plt.axes(projection=proj)
-        ax.coastlines(coastres, zorder=10, color='k', linewidth=2)
+        ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
         ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=10) #'#FFE9B5'
         ax.add_feature(cartopy.feature.BORDERS, zorder=10, linewidth=.5, linestyle=':')
-
+        if rivers is True:
+            ax.add_feature(cartopy.feature.RIVERS, zorder=12)
         gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
         gl.top_labels = False
         gl.right_labels = False    
-        
-        r = self.raster#.where(self.raster>0, 1e-30)
-        im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
+
+        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap)
         cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
-        plt.colorbar(im, cax=cax, extend='max')
-        
-        ax.set_title('mean particle distribution')
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.set_label(cbar_label, rotation=90)
         
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
         
-        
+        ax.set_title('Particle trajectories over time', fontsize=10)
+
         plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
         plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
         plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
@@ -695,8 +1033,10 @@ class LagrangianDispersion(object):
         plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
         plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
         plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
-                
 
+        return fig, ax
+    
+    
     def animate(self):
         """
         WIP. Histogram animation using xmovie
