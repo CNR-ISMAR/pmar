@@ -27,6 +27,7 @@ import matplotlib.colors as col
 import os
 from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
+import netrc
 
 
 logger = logging.getLogger("LagrangianDispersion")
@@ -74,7 +75,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self, basin, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
+    def __init__(self, basin, basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
         """
         Parameters
         ----------
@@ -123,7 +124,18 @@ class LagrangianDispersion(object):
         self.raster = None
         self.ds = None
         self.origin_marker = 0
+        self.netrc_path = netrc_path
         pass
+
+    def get_userinfo(self, machine):
+        try:
+            secrets = netrc.netrc(self.netrc_path)
+        except FileNotFoundError:
+            ''
+        auth = secrets.authenticators(machine)
+        if auth is None:
+            return ''
+        return f'{auth[0]}:{auth[2]}@'
     
     def run(self, pnum, time, repeat_run=1, res=0.04, crs='4326', lon=None, lat=None, z=-0.5, tstep=6, hdiff=10, termvel=1e-3, bounds=None, use_path='even_dist', decay_rate=0, depth_layer='water_column', z_bounds=[10,100], loglevel=20, save_to=None):         
         """
@@ -323,7 +335,8 @@ class LagrangianDispersion(object):
                 DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m' # ocean currents bs
             else:
                 raise ValueError("basin not recognised. Must be one of 'med' or 'bs'")
-            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
+            userinfo = self.get_userinfo('my.cmems-du.eu')
+            self.o.add_readers_from_list([f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'])
         elif self.uv_path != 'cmems': 
             #uv_reader = reader_netCDF_CF_generic.Reader(self.uv_path)
             self.o.add_readers_from_list(self.uv_path) # add reader from local file
@@ -333,7 +346,8 @@ class LagrangianDispersion(object):
             
         if self.wind_path == 'cmems':
             WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' #wind
-            self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
+            userinfo = self.get_userinfo('my.cmems-du.eu')
+            self.o.add_readers_from_list([f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'])
         elif self.wind_path != 'cmems':
             wind_reader = reader_netCDF_CF_generic.Reader(self.wind_path)
             self.o.add_readers_from_list(self.wind_path) # add reader from local file
@@ -349,7 +363,8 @@ class LagrangianDispersion(object):
             if self.mld_path == 'cmems':
                 # mixed layer depth (cmems)
                 mld_ID = f'{str(self.basin)}-cmcc-mld-rean-d'
-                self.o.add_readers_from_list([f'https://my.cmems-du.eu/thredds/dodsC/{mld_ID}'])
+                userinfo = self.get_userinfo('my.cmems-du.eu')
+                self.o.add_readers_from_list([f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'])
             elif self.mld_path != 'cmems':
                 mld_reader = reader_netCDF_CF_generic.Reader(self.mld_path)
                 self.o.add_reader(mld_reader) # add reader from local file
