@@ -187,7 +187,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=False):         
+    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_tif=True, plot=True):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -240,8 +240,8 @@ class LagrangianDispersion(object):
         loglevel : int, optional
             OpenDrift loglevel. Set to 0 (default) to retrieve all debug information.
             Provide a higher value (e.g. 20) to receive less output.
-        save_to : str, optional
-            Filename to write raster figure to within the 'basedir' directory. 
+        save_tif : bool, optional
+            Whether to save raster figure in the 'rasters' directory. Default is True
         
         """
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
@@ -291,7 +291,27 @@ class LagrangianDispersion(object):
 
         # compute raster
         if raster == True:
-            self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, save_to=save_to, plot=plot)
+            if type(use_path) == str:
+                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, save_tif=save_tif, plot=plot)
+                self.raster = r
+            elif type(use_path) == list:
+                for idx, use in enumerate(use_path):
+                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, save_tif=save_tif, plot=plot)
+                    if idx == 0:
+                        self.raster = r
+                    else:
+                        self.raster = xr.merge([self.raster, r.rename({'r0': f'r{idx}', 'lon_bin': f'lon_bin_{idx}', 'lat_bin': f'lat_bin_{idx}'})], compat='broadcast_equals', join='outer', fill_value=0, combine_attrs='no_conflicts')
+            
+            else:
+                raise ValueError('"use_path" not recognised. "use_path" must be either a string or list of strings containing path(s) to use layers.')
+        
+        # save final raster to netcdf, delete temporary files
+        if save_tif is True:
+            for i, r in enumerate(self.raster.data_vars): # save all available rasters
+                self.raster[f'{r}'].rio.to_raster(self.basedir / 'rasters' / f'raster_{i}.tif')
+        
+        if plot is True:
+            return self.plot()
         
         return self
     
@@ -629,7 +649,7 @@ class LagrangianDispersion(object):
         pass     
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], save_to=None, plot=True):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], save_tif=True, plot=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -659,8 +679,8 @@ class LagrangianDispersion(object):
             Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
         z_bounds : list, optional
             Two parameters, given as z_bounds=[z_surface, z_bottom], determining the depth layers' thickness in [m]. The first represents vertical distance from the ocean surface (z=0), whhile the second represents vertical distance from the ocean bottom, given by the bathymetry. Default is z_bounds=[10,100].
-        save_to : str, optional
-            Filename to write raster figure to within the 'basedir' directory. 
+        save_tif : bool, optional
+            Whether to save raster figures in the 'rasters' directory. Default is True
         """
     
         t_0 = T.time()
@@ -824,37 +844,22 @@ class LagrangianDispersion(object):
             .rio.write_nodata(-1)
             .rio.write_crs('epsg:'+str(crs))
             .rio.write_coordinate_system())
-
-        #self.raster = r
         
-        r=r.assign_attrs({'use_path': use_path}).to_dataset()
-
-        #### SAVING RASTERS INTO CLASS INSTANCE SO I DONT HAVE TO RECALCULATE THEM EVERY TIME #### 
-        if self.raster is None:
-            self.raster = r.rename({'histogram_lon_lat': 'r'})
-        else:
-            self.raster = xr.merge([self.raster, r.rename({'histogram_lon_lat': f'r{len(self.raster)}', 'lon_bin': f'lon_bin_{len(self.raster)}', 'lat_bin': f'lat_bin_{len(self.raster)}'})], compat='broadcast_equals', join='outer', fill_value=0, combine_attrs='no_conflicts')
+        r=r.assign_attrs({'use_path': use_path}).to_dataset().rename({'histogram_lon_lat': 'r0'})
         
-        
-        # save final raster to netcdf, delete temporary files
-        if save_to is None:
-            pass
-        else:
-            r.rio.to_raster(self.basedir / 'rasters' / save_to)
-        
-        # remove temporary files
+        # remove temporary files and folder
         for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
-            p.unlink()
+            p.unlink()    
         
+        # rm qtemp        
+        os.rmdir(self.basedir / qtemp)
+
         elapsed = (T.time() - t_0)
-        print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))    
+        print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
         
-        if plot is True:
-            return self.plot()
-        else:
-            pass
+        return r
     
-    def plot(self, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None):
+    def plot(self, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_png=True):
         """
         Plot particle_raster outputs.
         
@@ -912,8 +917,11 @@ class LagrangianDispersion(object):
             A tuple (width, height) of the figure in inches.   
         rivers : bool, optional
             Whether to plot rivers. Default is False
+        save_png : bool, optional
+            Whether to save figure as png. Default is True
         """
         
+        print('creating thumbnails...')
         
         SMALL_SIZE = 8
         MEDIUM_SIZE = 10
@@ -922,7 +930,7 @@ class LagrangianDispersion(object):
         if self.raster is None: 
             raise ValueError("No raster has been calculated yet. Please launch particle_raster method first.")
         
-        for r in self.raster.data_vars: # plot all available rasters
+        for i, r in enumerate(self.raster.data_vars): # plot all available rasters
             
             fig = plt.figure(figsize=figsize)
             ax = plt.axes(projection=proj)
@@ -958,6 +966,9 @@ class LagrangianDispersion(object):
             plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
             plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 
+            if save_png is True:
+                Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
+                plt.savefig(self.basedir / 'thumbnails' / f'thumbnail_r{i}.png', dpi=160, bbox_inches='tight')
             #return fig, ax
 
     
