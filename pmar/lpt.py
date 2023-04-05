@@ -79,7 +79,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self, context, pressure='general', basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
+    def __init__(self, context, pressure='general', basedir='lpt_output', poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False):
         """
         Parameters
         ---------- 
@@ -89,6 +89,8 @@ class LagrangianDispersion(object):
             
         basedir : str, optional
             path to the base directory where all output will be stored. Default is to create a directory called 'lpt output' in the current directory.
+        poly_path : str, optional
+            path to shapefile containing polygon to be used for seeding of particles
         uv_path : str, optional
             path to the netcdf file containing ocean current data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.
         wind_path : str, optional
@@ -112,7 +114,7 @@ class LagrangianDispersion(object):
         self.particle_path = particle_path # i can import an existing particle_path
         self.ds = None
         self.o = None
-        self.poly_path = None 
+        self.poly_path = poly_path 
         self.raster = None
         self.origin_marker = 0
         self.tstep = None
