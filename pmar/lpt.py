@@ -80,7 +80,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self, context, pressure='general', basedir='lpt_output', uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
+    def __init__(self, context, pressure='general', basedir='lpt_output', poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
         """
         Parameters
         ---------- 
@@ -90,6 +90,8 @@ class LagrangianDispersion(object):
             
         basedir : str, optional
             path to the base directory where all output will be stored. Default is to create a directory called 'lpt output' in the current directory.
+        poly_path : str, optional
+            path to shapefile containing polygon to be used for seeding of particles
         uv_path : str, optional
             path to the netcdf file containing ocean current data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.
         wind_path : str, optional
@@ -113,7 +115,7 @@ class LagrangianDispersion(object):
         self.particle_path = particle_path # i can import an existing particle_path
         self.ds = None
         self.o = None
-        self.poly_path = None 
+        self.poly_path = poly_path 
         self.raster = None
         self.origin_marker = 0
         self.netrc_path = netrc_path
@@ -121,7 +123,7 @@ class LagrangianDispersion(object):
         self.tseed = None
         self.pnum = None
         self.depth = depth
-        self.termvel = 0
+        self.termvel = 1e-3
         self.decay_rate = 0
         self.context = context
         self.outputdir = None
@@ -188,7 +190,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True):         
+    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -214,7 +216,7 @@ class LagrangianDispersion(object):
         hdiff : float, optional
             Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0.001m/s
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is None, meaning termvel is defined in __init__     
         raster : bool, optional
             Boolean stating whether to launch 'particle_raster' method. Default is True 
         res : float, optional
@@ -229,7 +231,7 @@ class LagrangianDispersion(object):
             Path to .tif file representing density of human use of marine environment, used for 'weights' of particles in histogram calculation. 
             If no use_path is given, a weight of 1 is given to all particles ('even' for even distribution).
         decay_rate : float, optional
-            Decay rate of particles in [days-1]. Default is 0
+            Decay rate of particles in [days-1]. Default is None, meaning decay_rate is defined in __init__
         aggregate : str, optional
             String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
         depth_layer : str, optional
@@ -248,10 +250,10 @@ class LagrangianDispersion(object):
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
         
-        if self.termvel is not None:
+        if termvel is None:
             termvel = self.termvel
          
-        if self.decay_rate is not None:
+        if decay_rate is None:
             decay_rate = self.decay_rate
         
         if self.particle_path is None:
@@ -293,11 +295,11 @@ class LagrangianDispersion(object):
         # compute raster
         if raster == True:
             if type(use_path) == str:
-                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds)
+                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
                 self.raster = r
             elif type(use_path) == list:
                 for idx, use in enumerate(use_path):
-                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds)
+                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
                     if idx == 0:
                         self.raster = r
                     else:
@@ -386,7 +388,7 @@ class LagrangianDispersion(object):
     
 
     
-    def particle_simulation(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=1e-3, crs='4326', loglevel=40):
+    def particle_simulation(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, crs='4326', loglevel=40):
         """
         Method to start a trajectory simulation, after initial configuration, using OpenDrift by MET Norway.
         Uses OceanDrift module. 
@@ -418,7 +420,7 @@ class LagrangianDispersion(object):
         hdiff : float, optional
             Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0.001m/s            
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is None, meaning termvel is defined in __init__      
         crs : str, optional
             EPSG string for polygon. Default is 4326   
         loglevel : int, optional
@@ -428,13 +430,9 @@ class LagrangianDispersion(object):
         t_0 = T.time()   
         
         context = self.context 
-
-        
-        if self.termvel is not None:
+ 
+        if termvel is None:
             termvel = self.termvel
-         
-        if self.decay_rate is not None:
-            decay_rate = self.decay_rate
         
         
         # raise error if unsupported context is requested
@@ -660,7 +658,7 @@ class LagrangianDispersion(object):
         pass     
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=0, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10]):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active_only'):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -683,21 +681,20 @@ class LagrangianDispersion(object):
             Path to file representing density of human use, used for 'weights' of particles in histogram calculation. 
             If no use_path is given, a weight of 1 is given to all particles by default ('even').
         decay_rate : float, optional
-            Decay rate of particles in [days-1]. Default is 0
+            Decay rate of particles in [days-1]. Default is None, meaning decay_rate is defined in __init__
         aggregate : 
             String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
         depth_layer : str, optional
             Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
         z_bounds : list, optional
             Two parameters, given as z_bounds=[z_surface, z_bottom], determining the depth layers' thickness in [m]. The first represents vertical distance from the ocean surface (z=0), whhile the second represents vertical distance from the ocean bottom, given by the bathymetry. Default is z_bounds=[10,100].
+        particle_status : str, optional
+            Parameter controlling which particles to include in raster, based on their status at the end of the run. Options are ['all', 'stranded', 'seafloor', 'active_only'], Default is 'active_only' 
         """
     
         t_0 = T.time()
-        
-        if self.termvel is not None:
-            termvel = self.termvel
          
-        if self.decay_rate is not None:
+        if decay_rate is None:
             decay_rate = self.decay_rate
         
         ### copied this section to __init__, if particle_path is not None
@@ -715,9 +712,17 @@ class LagrangianDispersion(object):
         _ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
 
         _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID            
+        
+        cond_stranded = {
+                'stranded': _ds.status==1, 
+                'seafloor': _ds.status==2, 
+                'active_only': _ds.status==0,
+               }
+
+        if particle_status in cond_stranded.keys():
+            _ds = _ds.where(cond_stranded[particle_status])
+            
         self.ds = _ds
-        #else:
-         #   _ds = self.ds
             
             
         ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
