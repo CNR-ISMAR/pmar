@@ -29,6 +29,7 @@ from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
 import netrc
 import random
+import rasterio
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -190,7 +191,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='sum', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
+    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -233,7 +234,7 @@ class LagrangianDispersion(object):
         decay_rate : float, optional
             Decay rate of particles in [days-1]. Default is None, meaning decay_rate is defined in __init__
         aggregate : str, optional
-            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
+            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'mean' over time. Default is 'mean'
         depth_layer : str, optional
             Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
         z_bounds : list, optional
@@ -658,7 +659,7 @@ class LagrangianDispersion(object):
         pass     
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active_only'):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active_only'):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -683,7 +684,7 @@ class LagrangianDispersion(object):
         decay_rate : float, optional
             Decay rate of particles in [days-1]. Default is None, meaning decay_rate is defined in __init__
         aggregate : 
-            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'sum' over time. Default is 'sum'
+            String indicating whether trajectories should be aggregated by calculating their maximum ('max') or 'mean' over time. Default is 'mean'
         depth_layer : str, optional
             Depth layer chosen for computing histogram. One of 'full_depth', 'water_column', 'surface' or 'seafloor'. Default is 'full_depth'
         z_bounds : list, optional
@@ -829,10 +830,10 @@ class LagrangianDispersion(object):
         qtemp = str('tempfiles'+"{:05d}".format(random.randint(0,99999)))
         Path(self.basedir / qtemp).mkdir(parents=True, exist_ok=True)
         
-        if aggregate == 'sum':
+        if aggregate == 'mean':
             for i in range(0,slices+1):
                 d = ds.isel(time=slice(step*i,step+step*i))
-                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
+                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).mean('time')
                 hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
                 del hh, d
 
@@ -859,6 +860,34 @@ class LagrangianDispersion(object):
             .rio.write_coordinate_system())
         
         r=r.assign_attrs({'use_path': use_path}).to_dataset().rename({'histogram_lon_lat': 'r0'})
+        
+        ####### Landmask ######
+        shpfilename = shpreader.natural_earth(resolution='10m',
+                                    category='physical',
+                                    name='land')
+                    
+        mask = gpd.read_file(shpfilename)
+
+        if particle_status in ['active_only', 'seafloor']:
+            ShapeMask = rasterio.features.geometry_mask(mask.to_crs(r.rio.crs).geometry,
+                                                  out_shape=(len(r.lat_bin), len(r.lon_bin)),
+                                                  transform=r.rio.transform(),
+                                                  invert=True, all_touched=True)
+            ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
+            
+            r = r.where(ShapeMask==0)
+            
+        elif particle_status == 'stranded':
+            r = r.where(r!=0)
+            
+        else: 
+            newm = mask.buffer(distance=-0.1) # add buffer to include both stranded and active particles
+            ShapeMask = rasterio.features.geometry_mask(newm.to_crs(r.rio.crs).geometry,
+                                                  out_shape=(len(r.lat_bin), len(r.lon_bin)),
+                                                  transform=r.rio.transform(),
+                                                  invert=True, all_touched=True)
+            ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
+            r = r.where(ShapeMask==0)
         
         # remove temporary files and folder
         for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
@@ -946,7 +975,7 @@ class LagrangianDispersion(object):
             fig = plt.figure(figsize=figsize)
             ax = plt.axes(projection=proj)
             ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
-            ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=10) #'#FFE9B5'
+            ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=1) #'#FFE9B5'
             ax.add_feature(cartopy.feature.BORDERS, zorder=10, linewidth=.5, linestyle=':')
             if rivers is True:
                 ax.add_feature(cartopy.feature.RIVERS, zorder=12)
