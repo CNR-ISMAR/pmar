@@ -859,7 +859,7 @@ class LagrangianDispersion(object):
 
             _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='time', combine='nested').max('time').histogram_lon_lat
         else:
-            raise ValueError("'aggregate' must be one of 'sum' or 'max'.")
+            raise ValueError("'aggregate' must be one of 'mean' or 'max'.")
         
         h = _h.transpose()
                 
