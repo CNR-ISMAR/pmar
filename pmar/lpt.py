@@ -322,7 +322,7 @@ class LagrangianDispersion(object):
 
                     self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i}.tif')
                     # save corresponding thumbnails in save output directory
-                    self.plot(save_fig=f'{str(outputdir)}/thumbnail_raster_{i}.png')
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i}.png')
                     
             self.outputdir = outputdir
         
@@ -889,6 +889,9 @@ class LagrangianDispersion(object):
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
             r = r.where(ShapeMask==0)
         
+        # remove extra nan values on grid (land)
+        r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
+        
         # remove temporary files and folder
         for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
             p.unlink()    
@@ -899,9 +902,13 @@ class LagrangianDispersion(object):
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
         
+        #self.raster = r
+        
+        
+        
         return r
     
-    def plot(self, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig=True):
+    def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig=True):
         """
         Plot particle_raster outputs.
         
@@ -970,6 +977,9 @@ class LagrangianDispersion(object):
         if self.raster is None: 
             raise ValueError("No raster has been calculated yet. Please launch particle_raster method first.")
         
+        if r is None:
+            r = self.raster[list(self.raster.data_vars)[-1]]
+        
         #for i, r in enumerate(self.raster.data_vars): # plot all available rasters
         else:
             fig = plt.figure(figsize=figsize)
@@ -983,7 +993,6 @@ class LagrangianDispersion(object):
             gl.top_labels = False
             gl.right_labels = False    
 
-            r = self.raster[list(self.raster.data_vars)[-1]]
             #im = self.raster[f'{r}'].where(self.raster[f'{r}']!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
             im = r.where(r!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
             cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
