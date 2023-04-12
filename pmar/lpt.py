@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from shapely.geometry import Point, Polygon
 from datetime import timedelta
 from opendrift.models.oceandrift import OceanDrift
+from opendrift.models.openoil import OpenOil
 from opendrift.readers import reader_netCDF_CF_generic
 import opendrift
 from pydap.client import open_url
@@ -128,6 +129,7 @@ class LagrangianDispersion(object):
         self.decay_rate = 0
         self.context = context
         self.outputdir = None
+        self.pressure = pressure
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -136,10 +138,15 @@ class LagrangianDispersion(object):
                             'decay_rate': [0, 0, 1]})
         
         
-        if pressure is not None:
+        if pressure in pres_list:
             self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
             self.decay_rate = pressures[pressures['pressure'] == f'{pressure}']['decay_rate'].values[0]
-    
+        
+        elif pressure == 'oil':
+            pass
+        
+        else:
+            pass
     
         # if particle_path is given, retrieve attributes from filename and load ds
         
@@ -489,7 +496,11 @@ class LagrangianDispersion(object):
         
         
         # initialise OpenDrift object
-        self.o = OceanDrift(loglevel=loglevel) 
+        if self.pressure == 'oil':
+            self.o = OpenOil(loglevel=loglevel)
+        else:
+            self.o = OceanDrift(loglevel=loglevel) 
+        
 
         # if a file with that name already exists, simply import it  
         if q.exists() == True:
@@ -1023,7 +1034,7 @@ class LagrangianDispersion(object):
             return fig, ax
 
     
-    def scatter(self, t=None, xlim=None, ylim=None, s=1, c='age', cmap='viridis', coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, save_to=None):
+    def scatter(self, t=None, xlim=None, ylim=None, s=1, c='age', cmap='rainbow', coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, save_to=None):
         """
         Visualise particle trajectories over time [days elapsed], defined by age_seconds. 
         
@@ -1070,11 +1081,11 @@ class LagrangianDispersion(object):
         
         if c == 'age': 
             c = ds.age_seconds/60/60/24
-            cmap = 'rainbow' #'copper'
+            #cmap = 'rainbow' #'copper'
             cbar_label = 'elapsed days'
         elif c == 'z':
             c = ds.z
-            cmap = 'viridis'
+            #cmap = 'viridis'
             cbar_label = 'depth [m]'
         
         SMALL_SIZE = 8
