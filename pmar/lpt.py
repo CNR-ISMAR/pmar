@@ -82,7 +82,7 @@ class LagrangianDispersion(object):
     """
     
     
-    def __init__(self, context, pressure='general', basedir='lpt_output', poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
+    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
         """
         Parameters
         ---------- 
@@ -130,6 +130,7 @@ class LagrangianDispersion(object):
         self.context = context
         self.outputdir = None
         self.pressure = pressure
+        self.localdatadir = localdatadir
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -528,6 +529,11 @@ class LagrangianDispersion(object):
             # import relevant readers based on context
             if context == 'bridge-bs': # local WP2 data
                 
+                if self.localdatadir is None:
+                    raise ValueError('bridge-bs data not found. Please provide absolute path to directory containing oceanographic / atmospheric data from bridge-bs, i.e. localdatadir')
+                else:    
+                    bridge_dir = Path(self.localdatadir)
+                
                 dates = pd.date_range(start_time.strftime("%Y-%m"),(start_time+duration).strftime("%Y-%m"),freq='MS').strftime("%Y-%m").tolist()
                 
                 uvpaths={}
@@ -536,8 +542,8 @@ class LagrangianDispersion(object):
 
                 for idx, d in enumerate(dates):
                     date = d.replace('-', '')
-                    uvpaths[idx] = f'/home/sbosi/data/processed_BRIDGE_WP2/BS_1d_{date}*UV.nc'
-                    mldpaths[idx] = f'/home/sbosi/data/processed_BRIDGE_WP2/BS_1d_{date}*MLD.nc'   
+                    uvpaths[idx] = str(bridge_dir / f'BS_1d_{date}*UV.nc')
+                    mldpaths[idx] = str(bridge_dir / f'BS_1d_{date}*MLD.nc') 
                 
                 uv_path = list(uvpaths.values())
                 mld_path = list(mldpaths.values())
