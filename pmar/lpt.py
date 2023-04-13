@@ -892,7 +892,7 @@ class LagrangianDispersion(object):
         
         ####### Landmask ######
         if 'bs' in self.context:
-            shpfilename = f'/home/sbosi/data/polygons/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
+            shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
 
         else: # otherwise, use cartopy natural earth polygon
             import cartopy.io.shapereader as shpreader
