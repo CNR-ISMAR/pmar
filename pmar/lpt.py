@@ -199,7 +199,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = timedelta(days=28), pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
+    def run(self, reps=1, tshift = 28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -278,7 +278,7 @@ class LagrangianDispersion(object):
             # repeat run gives the number of times that exact same run has to be repeated. this coefficient is saved in 'origin_marker', which now appears in particle_path. 
             
             ### di default, ogni run è shiftata di 28 giorni rispetto alla precedente (scelta empirica)
-            tshift = tshift
+            tshift = timedelta(days=tshift)
             
             for n in range(0, reps):
                 print(f'----- STARTING RUN #{n+1} -----')
@@ -293,8 +293,8 @@ class LagrangianDispersion(object):
                 
                 self.particle_simulation(pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
                 particle_list[n] = self.particle_path
+                print(self.o)
                 print(f'----- DONE WITH RUN #{n+1} -----')
-
             
             if len(particle_list) == 1:
                 self.particle_path == list(particle_list.values())[0]
@@ -534,25 +534,28 @@ class LagrangianDispersion(object):
                 else:    
                     bridge_dir = Path(self.localdatadir)
                 
-                dates = pd.date_range(start_time.strftime("%Y-%m"),(start_time+duration).strftime("%Y-%m"),freq='MS').strftime("%Y-%m").tolist()
+                #dates = pd.date_range(start_time.strftime("%Y-%m-%d"),(start_time+duration).strftime("%Y-%m-%d"),freq='d').strftime("%Y-%m-%d").tolist()
                 
                 uvpaths={}
                 mldpaths={}
                 windpaths = {}
-
-                for idx, d in enumerate(dates):
-                    date = d.replace('-', '')
-                    uvpaths[idx] = str(bridge_dir / f'BS_1d_{date}*UV.nc')
-                    mldpaths[idx] = str(bridge_dir / f'BS_1d_{date}*MLD.nc') 
+                
+                for idx in range(start_time.year, end_time.year+1):
+                #for idx, d in enumerate(dates):
+                    #date = d.replace('-', '')
+                    uvpaths[idx] = str(bridge_dir / f'BS_1d_{idx}*UV.nc')
+                    mldpaths[idx] = str(bridge_dir / f'BS_1d_{idx}*MLD.nc') 
                 
                 uv_path = list(uvpaths.values())
                 mld_path = list(mldpaths.values())
+                print(uv_path)
                 
                 for i in range(start_time.year, end_time.year+1):
-                    windpaths[i] = f'/home/sbosi/data/BRIDGE-WP2/era5_y{i}.nc'
+                    windpaths[i] = str(bridge_dir / f'era5_y{i}.nc')
                 
                 wind_path = list(windpaths.values())
-                bathy_path = '/home/sbosi/data/BRIDGE-WP2/bs_bathymetry.nc'
+                bathy_path = str(bridge_dir / 'bs_bathymetry.nc')
+                print(wind_path)
                 
             elif context == 'bs-cmems': # copernicus Black Sea data (stream)
                 DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m'
