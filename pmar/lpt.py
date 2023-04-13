@@ -326,11 +326,11 @@ class LagrangianDispersion(object):
                 outputdir = Path(save_to)
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
-                    print(f'creating thumbnail #{i}...')
+                    print(f'creating thumbnail #{i+1}...')
 
-                    self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i}.tif')
+                    self.raster[f'{r}'].rio.write_nodata(-1).rio.to_raster(outputdir / f'raster_{i+1}.tif')
                     # save corresponding thumbnails in save output directory
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i}.png')
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
                     
             self.outputdir = outputdir
         
