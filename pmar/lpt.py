@@ -131,6 +131,7 @@ class LagrangianDispersion(object):
         self.outputdir = None
         self.pressure = pressure
         self.localdatadir = localdatadir
+        self.particle_status = None
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -259,6 +260,8 @@ class LagrangianDispersion(object):
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
         
+        self.particle_status = particle_status
+        
         if termvel is None:
             termvel = self.termvel
          
@@ -293,7 +296,7 @@ class LagrangianDispersion(object):
                 
                 self.particle_simulation(pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
                 particle_list[n] = self.particle_path
-                print(self.o)
+                #print(self.o)
                 print(f'----- DONE WITH RUN #{n+1} -----')
             
             if len(particle_list) == 1:
@@ -534,28 +537,28 @@ class LagrangianDispersion(object):
                 else:    
                     bridge_dir = Path(self.localdatadir)
                 
-                #dates = pd.date_range(start_time.strftime("%Y-%m-%d"),(start_time+duration).strftime("%Y-%m-%d"),freq='d').strftime("%Y-%m-%d").tolist()
+                dates = pd.date_range(start_time.strftime("%Y-%m-%d"),(start_time+duration).strftime("%Y-%m-%d"),freq='d').strftime("%Y-%m-%d").tolist()
                 
                 uvpaths={}
                 mldpaths={}
                 windpaths = {}
                 
-                for idx in range(start_time.year, end_time.year+1):
-                #for idx, d in enumerate(dates):
-                    #date = d.replace('-', '')
-                    uvpaths[idx] = str(bridge_dir / f'BS*{idx}*UV.nc')
-                    mldpaths[idx] = str(bridge_dir / f'BS*{idx}*MLD.nc') 
+                #for idx in range(start_time.year, end_time.year+1):
+                for idx, d in enumerate(dates):
+                    date = d.replace('-', '')
+                    uvpaths[idx] = str(bridge_dir / f'BS*{date}*UV.nc')
+                    mldpaths[idx] = str(bridge_dir / f'BS*{date}*MLD.nc') 
                 
                 uv_path = list(uvpaths.values())
                 mld_path = list(mldpaths.values())
-                print(uv_path)
+                #print(uv_path)
                 
                 for i in range(start_time.year, end_time.year+1):
                     windpaths[i] = str(bridge_dir / f'era5_y{i}.nc')
                 
                 wind_path = list(windpaths.values())
                 bathy_path = str(bridge_dir / 'bs_bathymetry.nc')
-                print(wind_path)
+                #print(wind_path)
                 
             elif context == 'bs-cmems': # copernicus Black Sea data (stream)
                 DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m'
@@ -598,6 +601,12 @@ class LagrangianDispersion(object):
                 bathy_reader = reader_netCDF_CF_generic.Reader(bathy_path)
                 self.o.add_reader(bathy_reader)
 
+            
+            if context == 'bridge-bs':
+                for k,r in self.o.readers.items(): 
+                    r.always_valid = True                  
+            
+                
             # some OpenDrift configurations
             self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
             self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
@@ -872,12 +881,6 @@ class LagrangianDispersion(object):
         
         h = _h.transpose()   
         
-        ####### Landmask ######
-        #basins = regionmask.defined_regions.natural_earth_v5_0_0.ocean_basins_50
-        #mask = basins.mask(h.rename({'lon_bin':'lon', 'lat_bin': 'lat'}))
-        
-        #h = h.rename({'lon_bin':'lon', 'lat_bin': 'lat'}).where(~np.isnan(mask))
-        
         # write geo information to xarray and save as geotiff
         r = (
             xr.DataArray(h) # need to transpose it because xhistogram does that for some reason
@@ -887,38 +890,31 @@ class LagrangianDispersion(object):
         
         r=r.assign_attrs({'use_path': use_path}).to_dataset().rename({'histogram_lon_lat': 'r0'})
         
-
+        ####### Landmask ######
         if 'bs' in self.context:
-            shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
-            
+            shpfilename = f'/home/sbosi/data/polygons/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
+
         else: # otherwise, use cartopy natural earth polygon
+            import cartopy.io.shapereader as shpreader
+
             shpfilename = shpreader.natural_earth(resolution='10m',
                                         category='physical',
-                                        name='land')
+                                        name='ocean')
 
-        mask = gpd.read_file(shpfilename)
+        _mask = gpd.read_file(shpfilename)
 
         if particle_status in ['active_only', 'seafloor']:
-            ShapeMask = rasterio.features.geometry_mask(mask.to_crs(r.rio.crs).geometry,
-                                                  out_shape=(len(r.lat_bin), len(r.lon_bin)),
-                                                  transform=r.rio.transform(),
-                                                  invert=True, all_touched=True)
-            ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
-            
-            r = r.where(ShapeMask==0)
-            
-        #elif particle_status == 'stranded':
-        #    r = r.where(r>0)
-            
-        else: 
-            newm = mask.buffer(distance=0.1) # add buffer to include both stranded and active particles
-            ShapeMask = rasterio.features.geometry_mask(newm.to_crs(r.rio.crs).geometry,
-                                                  out_shape=(len(r.lat_bin), len(r.lon_bin)),
-                                                  transform=r.rio.transform(),
-                                                  invert=True, all_touched=True)
-            ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
-            r = r.where(ShapeMask!=0)
-        
+            mask = _mask
+        else:
+            mask = _mask.buffer(distance=0.1) # if including beached particles, consider a buffer around ocean 
+
+        ShapeMask = rasterio.features.geometry_mask(mask.to_crs(r.rio.crs).geometry,
+                                              out_shape=(len(r.lat_bin), len(r.lon_bin)),
+                                              transform=r.rio.transform(),
+                                              invert=True, all_touched=True)
+        ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
+
+        r = r.where(ShapeMask)
         
         # remove extra nan values on grid (land)
         #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
@@ -934,8 +930,6 @@ class LagrangianDispersion(object):
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
         
         #self.raster = r
-        
-        
         
         return r
     
@@ -1011,7 +1005,6 @@ class LagrangianDispersion(object):
         if r is None:
             r = self.raster[list(self.raster.data_vars)[-1]]
         
-        #for i, r in enumerate(self.raster.data_vars): # plot all available rasters
         else:
             pass
         
@@ -1025,7 +1018,7 @@ class LagrangianDispersion(object):
         fig = plt.figure(figsize=figsize)
         ax = plt.axes(projection=proj)
         ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
-        ax.add_feature(cartopy.feature.LAND, zorder=10, facecolor='0.9') #'#FFE9B5'
+        ax.add_feature(cartopy.feature.LAND, zorder=0, facecolor='0.9') #'#FFE9B5'
         ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
         if rivers is True:
             ax.add_feature(cartopy.feature.RIVERS, zorder=12)
@@ -1033,8 +1026,7 @@ class LagrangianDispersion(object):
         gl.top_labels = False
         gl.right_labels = False    
 
-        #im = self.raster[f'{r}'].where(self.raster[f'{r}']!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
-        im = r.where(r>=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
+        im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
         cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
         cbar = plt.colorbar(im, cax=cax, extend='max')
         cbar.set_label('particles/gridcell', rotation=90)
