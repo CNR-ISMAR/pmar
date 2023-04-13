@@ -875,17 +875,22 @@ class LagrangianDispersion(object):
         # write geo information to xarray and save as geotiff
         r = (
             xr.DataArray(h) # need to transpose it because xhistogram does that for some reason
-            .rio.write_nodata(-1)
+            .rio.write_nodata(np.nan)
             .rio.write_crs('epsg:'+str(crs))
             .rio.write_coordinate_system())
         
         r=r.assign_attrs({'use_path': use_path}).to_dataset().rename({'histogram_lon_lat': 'r0'})
         
         ####### Landmask ######
+        
+        #if 'bs' in self.context:
+         #   shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
+            
+        #else: # otherwise, use cartopy natural earth polygon
         shpfilename = shpreader.natural_earth(resolution='10m',
-                                    category='physical',
-                                    name='land')
-                    
+                                        category='physical',
+                                        name='land')
+
         mask = gpd.read_file(shpfilename)
 
         if particle_status in ['active_only', 'seafloor']:
@@ -895,10 +900,10 @@ class LagrangianDispersion(object):
                                                   invert=True, all_touched=True)
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
             
-            r = r.where(ShapeMask==0).rio.write_nodata(np.nan)
+            r = r.where(ShapeMask==0)
             
         elif particle_status == 'stranded':
-            r = r.where(r!=0).rio.write_nodata(np.nan)
+            r = r.where(r!=0)
             
         else: 
             newm = mask.buffer(distance=-0.1) # add buffer to include both stranded and active particles
@@ -907,10 +912,13 @@ class LagrangianDispersion(object):
                                                   transform=r.rio.transform(),
                                                   invert=True, all_touched=True)
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
-            r = r.where(ShapeMask==0).rio.write_nodata(np.nan)
+            r = r.where(ShapeMask==0)
+        
+        
+        
         
         # remove extra nan values on grid (land)
-        r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
+        #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
         
         # remove temporary files and folder
         for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
@@ -1002,45 +1010,54 @@ class LagrangianDispersion(object):
         
         #for i, r in enumerate(self.raster.data_vars): # plot all available rasters
         else:
-            fig = plt.figure(figsize=figsize)
-            ax = plt.axes(projection=proj)
-            ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
-            ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=1) #'#FFE9B5'
-            ax.add_feature(cartopy.feature.BORDERS, zorder=10, linewidth=.5, linestyle=':')
-            if rivers is True:
-                ax.add_feature(cartopy.feature.RIVERS, zorder=12)
-            gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
-            gl.top_labels = False
-            gl.right_labels = False    
+            pass
+        
+        # drop nan values to have cleaner thumbnails
+        lon_var = [varname for varname in r.coords if "lon" in varname][0] # find name of lon variable
+        lat_var = [varname for varname in r.coords if "lat" in varname][0] # find name of lat variable
 
-            #im = self.raster[f'{r}'].where(self.raster[f'{r}']!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
-            im = r.where(r!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
-            cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
-            cbar = plt.colorbar(im, cax=cax, extend='max')
-            cbar.set_label('particles/gridcell', rotation=90)
+        r = r.where(r>=0)
+        r = r.dropna(str(lon_var), 'all').dropna(str(lat_var), 'all')
+        
+        fig = plt.figure(figsize=figsize)
+        ax = plt.axes(projection=proj)
+        ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
+        ax.add_feature(cartopy.feature.LAND, zorder=10, facecolor='0.9') #'#FFE9B5'
+        ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
+        if rivers is True:
+            ax.add_feature(cartopy.feature.RIVERS, zorder=12)
+        gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
+        gl.top_labels = False
+        gl.right_labels = False    
 
-            if title is not None:
-                ax.set_title(title+'\n use_path: '+r.use_path, fontsize=12)
-            else:
-                ax.set_title('use_path: '+r.use_path, fontsize=8)
+        #im = self.raster[f'{r}'].where(self.raster[f'{r}']!=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
+        im = r.where(r>=0).plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
+        cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
+        cbar = plt.colorbar(im, cax=cax, extend='max')
+        cbar.set_label('particles/gridcell', rotation=90)
 
-            ax.set_xlim(xlim)
-            ax.set_ylim(ylim)
+        if title is not None:
+            ax.set_title(title+'\n use_path: '+r.use_path, fontsize=12)
+        else:
+            ax.set_title('use_path: '+r.use_path, fontsize=8)
+
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
 
 
-            plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
-            plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
-            plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
-            plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-            plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-            plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
-            plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+        plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
+        plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
+        plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
+        plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+        plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+        plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
+        plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 
-            if save_fig is not None:
-             #   Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
-                plt.savefig(str(save_fig), dpi=160, bbox_inches='tight')
+        if save_fig is not None:
+         #   Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
+            plt.savefig(str(save_fig), dpi=160, bbox_inches='tight')
 
-            return fig, ax
+        return fig, ax
 
     
     def scatter(self, t=None, xlim=None, ylim=None, s=1, c='age', cmap='rainbow', coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, save_to=None):
