@@ -31,6 +31,7 @@ import cartopy.io.shapereader as shpreader
 import netrc
 import random
 import rasterio
+import regionmask
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -543,8 +544,8 @@ class LagrangianDispersion(object):
                 for idx in range(start_time.year, end_time.year+1):
                 #for idx, d in enumerate(dates):
                     #date = d.replace('-', '')
-                    uvpaths[idx] = str(bridge_dir / f'BS_1d_{idx}*UV.nc')
-                    mldpaths[idx] = str(bridge_dir / f'BS_1d_{idx}*MLD.nc') 
+                    uvpaths[idx] = str(bridge_dir / f'BS*{idx}*UV.nc')
+                    mldpaths[idx] = str(bridge_dir / f'BS*{idx}*MLD.nc') 
                 
                 uv_path = list(uvpaths.values())
                 mld_path = list(mldpaths.values())
@@ -870,8 +871,14 @@ class LagrangianDispersion(object):
         else:
             raise ValueError("'aggregate' must be one of 'mean' or 'max'.")
         
-        h = _h.transpose()
-                
+        h = _h.transpose()   
+        
+        ####### Landmask ######
+        #basins = regionmask.defined_regions.natural_earth_v5_0_0.ocean_basins_50
+        #mask = basins.mask(h.rename({'lon_bin':'lon', 'lat_bin': 'lat'}))
+        
+        #h = h.rename({'lon_bin':'lon', 'lat_bin': 'lat'}).where(~np.isnan(mask))
+        
         # write geo information to xarray and save as geotiff
         r = (
             xr.DataArray(h) # need to transpose it because xhistogram does that for some reason
@@ -881,13 +888,12 @@ class LagrangianDispersion(object):
         
         r=r.assign_attrs({'use_path': use_path}).to_dataset().rename({'histogram_lon_lat': 'r0'})
         
-        ####### Landmask ######
-        
-        #if 'bs' in self.context:
-         #   shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
+
+        if 'bs' in self.context:
+            shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
             
-        #else: # otherwise, use cartopy natural earth polygon
-        shpfilename = shpreader.natural_earth(resolution='10m',
+        else: # otherwise, use cartopy natural earth polygon
+            shpfilename = shpreader.natural_earth(resolution='10m',
                                         category='physical',
                                         name='land')
 
@@ -902,19 +908,17 @@ class LagrangianDispersion(object):
             
             r = r.where(ShapeMask==0)
             
-        elif particle_status == 'stranded':
-            r = r.where(r!=0)
+        #elif particle_status == 'stranded':
+        #    r = r.where(r>0)
             
         else: 
-            newm = mask.buffer(distance=-0.1) # add buffer to include both stranded and active particles
+            newm = mask.buffer(distance=0.1) # add buffer to include both stranded and active particles
             ShapeMask = rasterio.features.geometry_mask(newm.to_crs(r.rio.crs).geometry,
                                                   out_shape=(len(r.lat_bin), len(r.lon_bin)),
                                                   transform=r.rio.transform(),
                                                   invert=True, all_touched=True)
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
-            r = r.where(ShapeMask==0)
-        
-        
+            r = r.where(ShapeMask!=0)
         
         
         # remove extra nan values on grid (land)
