@@ -328,7 +328,7 @@ class LagrangianDispersion(object):
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
                     print(f'creating thumbnail #{i+1}...')
 
-                    self.raster[f'{r}'].rio.write_nodata(-1).rio.to_raster(outputdir / f'raster_{i+1}.tif')
+                    self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
                     # save corresponding thumbnails in save output directory
                     self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
                     
@@ -895,10 +895,10 @@ class LagrangianDispersion(object):
                                                   invert=True, all_touched=True)
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
             
-            r = r.where(ShapeMask==0)
+            r = r.where(ShapeMask==0).rio.write_nodata(np.nan)
             
         elif particle_status == 'stranded':
-            r = r.where(r!=0)
+            r = r.where(r!=0).rio.write_nodata(np.nan)
             
         else: 
             newm = mask.buffer(distance=-0.1) # add buffer to include both stranded and active particles
@@ -907,7 +907,7 @@ class LagrangianDispersion(object):
                                                   transform=r.rio.transform(),
                                                   invert=True, all_touched=True)
             ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
-            r = r.where(ShapeMask==0)
+            r = r.where(ShapeMask==0).rio.write_nodata(np.nan)
         
         # remove extra nan values on grid (land)
         r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
