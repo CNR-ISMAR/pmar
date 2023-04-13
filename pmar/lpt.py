@@ -31,7 +31,6 @@ import cartopy.io.shapereader as shpreader
 import netrc
 import random
 import rasterio
-import regionmask
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
