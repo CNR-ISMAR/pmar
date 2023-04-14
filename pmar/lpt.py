@@ -883,8 +883,12 @@ class LagrangianDispersion(object):
         h = _h.transpose()   
         
         # normalizzazione. moltiplico per pnum e divido per numero totale di celle
-        tot_cells = len(h.stack(box=('lon_bin', 'lat_bin')).dropna('box'))
-        h = h*self.pnum/tot_cells
+        #tot_cells = len(h.stack(box=('lon_bin', 'lat_bin')).dropna('box'))
+        #tot_cells = h.where(np.isnan(h),1).sum().load()
+        tot_cells = int(h.count().load())
+        h = h/self.pnum*tot_cells
+        print(tot_cells)
+        
         
         # write geo information to xarray and save as geotiff
         r = (
