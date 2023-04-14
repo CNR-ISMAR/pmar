@@ -132,6 +132,7 @@ class LagrangianDispersion(object):
         self.pressure = pressure
         self.localdatadir = localdatadir
         self.particle_status = None
+        self.reps = None
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -260,6 +261,7 @@ class LagrangianDispersion(object):
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
         
+        self.reps = reps
         self.particle_status = particle_status
         
         if termvel is None:
@@ -851,33 +853,31 @@ class LagrangianDispersion(object):
 
         
         ### chunking + aggregation method (sum, max, etc)
-        step = 100 # this is completely arbitrary for now
-        slices = int(len(ds.time)/step) # numer of slices / chunks
+        #step = 100 # this is completely arbitrary for now
+        #slices = int(len(ds.time)/step) # numer of slices / chunks
         
         ### need to rewrite this and make it cleaner (maybe use .exec()?), but for now:
         #### AGGREGATION METHOD ####
         qtemp = str('tempfiles'+"{:05d}".format(random.randint(0,99999)))
         Path(self.basedir / qtemp).mkdir(parents=True, exist_ok=True)
         
-        if aggregate == 'mean':
-            for i in range(0,slices+1):
-                d = ds.isel(time=slice(step*i,step+step*i))
-                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).mean('time')
-                hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
-                del hh, d
-
-            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='time', combine='nested').sum('time').histogram_lon_lat
-            
-        elif aggregate == 'max': 
-            for i in range(0,slices+1):
-                d = ds.isel(time=slice(step*i,step+step*i))
-                hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).max('time')
-                hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
-                del hh, d
-
-            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='time', combine='nested').max('time').histogram_lon_lat
+        if self.reps is not None:
+            reps = self.reps
         else:
-            raise ValueError("'aggregate' must be one of 'mean' or 'max'.")
+            reps = 1
+        
+        for i in range(0,reps):
+            d = ds.where(ds.origin_marker==i).dropna('trajectory', 'all')
+            hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
+            hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
+            del hh, d
+
+        if aggregate == 'mean':    
+            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
+        elif aggregate == 'max': 
+            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
+        else:
+            raise ValueError("'aggregate' must be one of 'mean' or 'max'.")        
         
         h = _h.transpose()   
         
@@ -920,11 +920,11 @@ class LagrangianDispersion(object):
         #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
         
         # remove temporary files and folder
-        for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
-            p.unlink()    
+        #for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
+            #p.unlink()    
         
         # rm qtemp        
-        os.rmdir(self.basedir / qtemp)
+        #os.rmdir(self.basedir / qtemp)
 
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
