@@ -31,6 +31,7 @@ import cartopy.io.shapereader as shpreader
 import netrc
 import random
 import rasterio
+from rasterio.enums import Resampling
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -802,9 +803,9 @@ class LagrangianDispersion(object):
             bds_reproj = poly.to_crs(spatial_ref).total_bounds 
             #create `weight` variable from value of `use` at starting positions of particles
             
-            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y')
+            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0, resampling=Resampling.bilinear).sortby('x').sortby('y')
             
-            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/30/24/60/60*self.tstep.total_seconds()   # matching timestep of simulation ### NEED TO GENERALISE
+            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) #/30/24/60/60*self.tstep.total_seconds()   # matching timestep of simulation ### NEED TO GENERALISE
             
             ds['weight'] = _weight
 
