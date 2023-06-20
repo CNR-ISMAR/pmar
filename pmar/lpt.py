@@ -62,7 +62,7 @@ class LagrangianDispersion(object):
         path to netcdf file containing output of OpenDrift simulation
     raster : xarray
         xarray object containing output of particle_raster() method
-    
+
     Methods
     -------
     run()
@@ -79,10 +79,10 @@ class LagrangianDispersion(object):
         plots trajectories over time 
     animate()
         WIP
-    
+
     """
-    
-    
+
+
     def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
         """
         Parameters
@@ -202,7 +202,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = 28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active_only'):         
+    def run(self, reps=1, tshift = 28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -691,7 +691,7 @@ class LagrangianDispersion(object):
         pass     
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active_only'):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active'):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -722,7 +722,7 @@ class LagrangianDispersion(object):
         z_bounds : list, optional
             Two parameters, given as z_bounds=[z_surface, z_bottom], determining the depth layers' thickness in [m]. The first represents vertical distance from the ocean surface (z=0), whhile the second represents vertical distance from the ocean bottom, given by the bathymetry. Default is z_bounds=[10,100].
         particle_status : str, optional
-            Parameter controlling which particles to include in raster, based on their status at the end of the run. Options are ['all', 'stranded', 'seafloor', 'active_only'], Default is 'active_only' 
+            Parameter controlling which particles to include in raster, based on their status at the end of the run. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'active' 
         """
     
         t_0 = T.time()
@@ -744,19 +744,16 @@ class LagrangianDispersion(object):
                 
         _ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
 
-        _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID            
+        _ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID   
         
-        cond_stranded = {
-                'stranded': _ds.status==1, 
-                'seafloor': _ds.status==2, 
-                'active_only': _ds.status==0,
-               }
+        status = {'active': 0, 'stranded': 1, 'seafloor': 2}
 
-        if particle_status in cond_stranded.keys():
-            _ds = _ds.where(cond_stranded[particle_status])
-            
-        self.ds = _ds
-            
+        if particle_status in status.keys():
+            traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
+            ds = _ds.sel(trajectory=traj)
+        else: 
+            ds = _ds
+   
             
         ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
         if self.poly_path is None:
@@ -774,20 +771,20 @@ class LagrangianDispersion(object):
 
         ### TIME INTERPOLATION ###
         if tinterp is not None:
-            new_time = np.arange(pd.to_datetime(_ds.time[0].values), pd.to_datetime(_ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
-            ds = _ds.interp(time=new_time, method='slinear') # interpolate dataset 
+            new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
+            ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
             ds['tinterp'] = tinterp
         else:
-            ds = _ds
+            pass
             
 
         ### BINS ### 
         
         # this polygon is only used to extract bounds for construction of bins in the case of an 'even' use distribution.
-        if r_bounds is not None:
+        if r_bounds is not None: # if r_bounds are given, meaning we are not using the full basin, create polygon
             poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False)
         else:    
-            poly = gpd.read_file(self.poly_path)
+            poly = gpd.read_file(self.poly_path).buffer(distance=.2) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
             r_bounds = poly.total_bounds
            
         # if no use path is given, compute bins from resolution and bounds of polygon
@@ -886,9 +883,7 @@ class LagrangianDispersion(object):
         #tot_cells = len(h.stack(box=('lon_bin', 'lat_bin')).dropna('box'))
         #tot_cells = h.where(np.isnan(h),1).sum().load()
         tot_cells = int(h.count().load())
-        h = h/self.pnum*tot_cells
-        print(tot_cells)
-        
+        h = h/self.pnum*tot_cells        
         
         # write geo information to xarray and save as geotiff
         r = (
@@ -912,7 +907,7 @@ class LagrangianDispersion(object):
 
         _mask = gpd.read_file(shpfilename)
 
-        if particle_status in ['active_only', 'seafloor']:
+        if particle_status in ['active', 'seafloor']:
             mask = _mask
         else:
             mask = _mask.buffer(distance=0.1) # if including beached particles, consider a buffer around ocean 
@@ -929,11 +924,11 @@ class LagrangianDispersion(object):
         #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
         
         # remove temporary files and folder
-        #for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
-            #p.unlink()    
+        for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
+            p.unlink()    
         
         # rm qtemp        
-        #os.rmdir(self.basedir / qtemp)
+        os.rmdir(self.basedir / qtemp)
 
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
@@ -1162,5 +1157,6 @@ class LagrangianDispersion(object):
         WIP. Histogram animation using xmovie
         
         """
+        
         pass
 
