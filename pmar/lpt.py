@@ -32,6 +32,7 @@ import netrc
 import random
 import rasterio
 from rasterio.enums import Resampling
+import tempfile
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -153,7 +154,7 @@ class LagrangianDispersion(object):
             pass
     
         # if particle_path is given, retrieve attributes from filename and load ds
-        
+
         if self.particle_path is not None: 
             
             avail_contexts = ['med', 'bs', 'bridge-bs', 'med-cmems', 'bs-cmems']
@@ -189,7 +190,7 @@ class LagrangianDispersion(object):
             
             if self.ds.poly_path is not None:
                 self.poly_path = str(self.ds.poly_path)
-            
+                
         pass
 
     def get_userinfo(self, machine):
@@ -495,10 +496,10 @@ class LagrangianDispersion(object):
                     raise ValueError('No polygon could be identified for seeding.')
         
         # path to write particle simulation file. also used for our 'cache'        
-        bds = np.round(gpd.read_file(self.poly_path).total_bounds) # only used in particle_path
+        bds = np.round(gpd.read_file(self.poly_path).total_bounds, 4) # only used in particle_path
         t0 = start_time.strftime('%Y-%m-%d')
         t1 = end_time.strftime('%Y-%m-%d')
-        particle_path = f'{str(self.context)}-lon_{int(bds[0])}-{int(bds[2])}_lat_{int(bds[1])}-{int(bds[3])}-time_{t0}_to_{t1}-pnum_{pnum}-tstep_{int(tstep.total_seconds())}s-tseed_{int(self.tseed.total_seconds())}s-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}-marker_{str(self.origin_marker)}.nc'
+        particle_path = f'{str(self.context)}-lon_{bds[0]}-{bds[2]}_lat_{bds[1]}-{bds[3]}-time_{t0}_to_{t1}-pnum_{pnum}-tstep_{int(tstep.total_seconds())}s-tseed_{int(self.tseed.total_seconds())}s-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}-marker_{str(self.origin_marker)}.nc'
         q =  self.basedir / 'particles' / particle_path
         
         
@@ -638,7 +639,8 @@ class LagrangianDispersion(object):
                                            origin_marker=self.origin_marker, radius=1e4)
             
             # run simulation and write to temporary file
-            temp_outfile = str(self.basedir)+'/temp_particle_file.nc'
+            qtemp = tempfile.TemporaryDirectory("raster", dir=self.basedir)
+            temp_outfile = qtemp.name + '/temp_particle_file.nc'
             
             now = datetime.now()
             current_time = now.strftime("%H:%M:%S")
@@ -685,10 +687,16 @@ class LagrangianDispersion(object):
         self.ds = ps
         
         self.particle_path = str(q) #particle_path
+
+        if 'qtemp' in locals():
+            Path(temp_outfile).unlink()
+            os.rmdir(qtemp.name)
+
         
         print('done.')
         
-        pass     
+        pass
+
     
 
     def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active'):
@@ -800,7 +808,7 @@ class LagrangianDispersion(object):
             bds_reproj = poly.to_crs(spatial_ref).total_bounds 
             #create `weight` variable from value of `use` at starting positions of particles
             
-            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0, resampling=Resampling.bilinear).sortby('x').sortby('y')
+            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y')
             
             _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) #/30/24/60/60*self.tstep.total_seconds()   # matching timestep of simulation ### NEED TO GENERALISE
             
@@ -856,8 +864,9 @@ class LagrangianDispersion(object):
         
         ### need to rewrite this and make it cleaner (maybe use .exec()?), but for now:
         #### AGGREGATION METHOD ####
-        qtemp = str('tempfiles'+"{:05d}".format(random.randint(0,99999)))
-        Path(self.basedir / qtemp).mkdir(parents=True, exist_ok=True)
+        # qtemp = str('tempfiles'+"{:05d}".format(random.randint(0,99999)))
+        # Path(self.basedir / qtemp).mkdir(parents=True, exist_ok=True)
+        qtemp = tempfile.TemporaryDirectory("raster", dir=self.basedir)
         
         if self.reps is not None:
             reps = self.reps
@@ -867,13 +876,13 @@ class LagrangianDispersion(object):
         for i in range(0,reps):
             d = ds.where(ds.origin_marker==i).dropna('trajectory', 'all')
             hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
-            hh.to_netcdf(f'{self.basedir}/{qtemp}/temphist_{i}.nc')
+            hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc')
             del hh, d
 
         if aggregate == 'mean':    
-            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
+            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
         elif aggregate == 'max': 
-            _h = xr.open_mfdataset(f'{self.basedir}/{qtemp}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
+            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
         else:
             raise ValueError("'aggregate' must be one of 'mean' or 'max'.")        
         
@@ -924,11 +933,11 @@ class LagrangianDispersion(object):
         #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
         
         # remove temporary files and folder
-        for p in Path(self.basedir / qtemp).glob("temphist*.nc"):
-            p.unlink()    
+        for p in Path(qtemp.name).glob("temphist*.nc"):
+            p.unlink()
         
         # rm qtemp        
-        os.rmdir(self.basedir / qtemp)
+        os.rmdir(qtemp.name)
 
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
@@ -1033,7 +1042,7 @@ class LagrangianDispersion(object):
         im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
         cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
         cbar = plt.colorbar(im, cax=cax, extend='max')
-        cbar.set_label('particles/gridcell', rotation=90)
+        cbar.set_label('uom from input layer', rotation=90)
 
         if title is not None:
             ax.set_title(title+'\n use_path: '+r.use_path, fontsize=12)
