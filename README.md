@@ -8,4 +8,4 @@
 
 PMAR is open source and is programmed in python. Particle trajectories are modelled using [OpenDrift](https://opendrift.github.io/). PMAR is so far only optimised to work on the Mediterranean and Black Sea basins.
 
-![[images/pmar_intro.png]]
+![Alt text](/images/pmar_intro.png)
