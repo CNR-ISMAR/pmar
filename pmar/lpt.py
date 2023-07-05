@@ -152,9 +152,26 @@ class LagrangianDispersion(object):
         
         else:
             pass
-    
+        
+        # if a path to a shapefile is given to be used for seeding, read it and save it in the lpt_output/polygons dir
+        if poly_path is not None: 
+            Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
+            poly = gpd.read_file(poly_path)
+            bds = np.round(poly.total_bounds, 4) 
+            local_poly = f'polygon-crs_epsg:{poly.crs.to_epsg()}-lon_{bds[0]}_{bds[2]}-lat—{bds[1]}_{bds[3]}.shp'
+            q = self.basedir / 'polygons' / local_poly
+            poly.to_file(str(q), driver='ESRI Shapefile')
+            self.poly_path = str(q)
+        else:
+            if 'med' in self.context:
+                self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
+            elif 'bs' in self.context:
+                self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
+            else:
+                pass
+            
+            
         # if particle_path is given, retrieve attributes from filename and load ds
-
         if self.particle_path is not None: 
             
             avail_contexts = ['med', 'bs', 'bridge-bs', 'med-cmems', 'bs-cmems']
@@ -188,6 +205,7 @@ class LagrangianDispersion(object):
     
             self.ds = ds
             
+            # if a particle_path is given, meaning a run with those configs already exists, the poly_path contained in the file's attributes "wins" over poly_path
             if self.ds.poly_path is not None:
                 self.poly_path = str(self.ds.poly_path)
                 
@@ -312,10 +330,10 @@ class LagrangianDispersion(object):
         if raster == True:
             if type(use_path) == str:
                 r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
-                self.raster = r
+                #self.raster = r
             elif type(use_path) == list:
                 for idx, use in enumerate(use_path):
-                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
+                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, save_r=False)
                     if idx == 0:
                         self.raster = r
                     else:
@@ -363,7 +381,7 @@ class LagrangianDispersion(object):
         
         
         Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-        poly_path = f'polygon-crs_epsg:{crs}-lon_{lon[0]}_{lon[1]}-lat—{lat[0]}_{lat[1]}.shp'
+        poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
         q = self.basedir / 'polygons' / poly_path
         
         if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
@@ -487,13 +505,8 @@ class LagrangianDispersion(object):
             lat = s_bounds[1::2]
             self.make_poly(lon, lat, crs=crs)
         else:
-            if self.poly_path is None:
-                if 'med' in self.context:
-                    self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
-                elif 'bs' in self.context:
-                    self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
-                else:
-                    raise ValueError('No polygon could be identified for seeding.')
+            pass
+
         
         # path to write particle simulation file. also used for our 'cache'        
         bds = np.round(gpd.read_file(self.poly_path).total_bounds, 4) # only used in particle_path
@@ -699,7 +712,7 @@ class LagrangianDispersion(object):
 
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active'):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active', save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -717,7 +730,7 @@ class LagrangianDispersion(object):
             Timestep (in hours) used for interpolation of trajectories in particle_raster method. Default is None
             ds
         r_bounds : bounds, optional
-            Spatial bounds for computation of raster written as bounds=[x1,y1,x2,y2]. Default is None (bounds are taken from self.poly_path)
+            Spatial bounds for computation of raster written as bounds=[x1,y1,x2,y2]. Default is None (bounds are taken from self.)
         use_path : str, optional
             Path to file representing density of human use, used for 'weights' of particles in histogram calculation. 
             If no use_path is given, a weight of 1 is given to all particles by default ('even').
@@ -731,6 +744,8 @@ class LagrangianDispersion(object):
             Two parameters, given as z_bounds=[z_surface, z_bottom], determining the depth layers' thickness in [m]. The first represents vertical distance from the ocean surface (z=0), whhile the second represents vertical distance from the ocean bottom, given by the bathymetry. Default is z_bounds=[10,100].
         particle_status : str, optional
             Parameter controlling which particles to include in raster, based on their status at the end of the run. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'active' 
+        save_r : bool, optional
+            Whether to save newly calculated raster in self.raster
         """
     
         t_0 = T.time()
@@ -762,20 +777,6 @@ class LagrangianDispersion(object):
         else: 
             ds = _ds
    
-            
-        ### if there is no poly_path to extract bounds from, take the one from the correct basin (which can be extracted from filename)
-        if self.poly_path is None:
-            if self.ds.poly_path is not None:
-                self.poly_path = str(self.ds.poly_path)
-            elif 'med' in self.context:
-                self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
-            elif 'bs' in self.context:
-                self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
-            else:
-                raise ValueError("No polygon could be extracted from particle_path. Please provide 'self.poly_path' manually.")
-        else:
-            pass
-
 
         ### TIME INTERPOLATION ###
         if tinterp is not None:
@@ -788,12 +789,16 @@ class LagrangianDispersion(object):
 
         ### BINS ### 
         
-        # this polygon is only used to extract bounds for construction of bins in the case of an 'even' use distribution.
-        if r_bounds is not None: # if r_bounds are given, meaning we are not using the full basin, create polygon
+        # this polygon is only used to extract bounds for construction of bins 
+        if r_bounds is not None: # if r_bounds are given, meaning we are not using the full basin, create polygon to use for aggregation / visualisation
             poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False)
-        else:    
-            poly = gpd.read_file(self.poly_path).buffer(distance=.2) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
-            r_bounds = poly.total_bounds
+        else:    # if no r_bounds are given, use seeding polygon
+            if self.poly_path is not None:
+                poly = gpd.read_file(self.poly_path).buffer(distance=.2) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
+                r_bounds = poly.total_bounds
+            elif self.poly_path is None: 
+                raise ValueError("No spatial domain found to perform aggregation. Please provide 'r_bounds' manually.")
+                
            
         # if no use path is given, compute bins from resolution and bounds of polygon
         if use_path == 'even':
@@ -942,7 +947,10 @@ class LagrangianDispersion(object):
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
         
-        #self.raster = r
+        if save_r == True:
+            self.raster = r
+        else:
+            pass
         
         return r
     
