@@ -881,15 +881,17 @@ class LagrangianDispersion(object):
         for i in range(0,reps):
             d = ds.where(ds.origin_marker==i).dropna('trajectory', 'all')
             hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
-            hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc')
-            del hh, d
-
+            hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc') 
+            del hh, d  
+                
         if aggregate == 'mean':    
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
         elif aggregate == 'max': 
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
+        elif aggregate.startswith('p'):
+            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').quantile(eval(aggregate.split('p')[-1])/100, dim='slices').histogram_lon_lat
         else:
-            raise ValueError("'aggregate' must be one of 'mean' or 'max'.")        
+            raise ValueError("'aggregate' must be one of 'mean', 'max' or 'p95'.")        
         
         h = _h.transpose()   
         
@@ -926,13 +928,13 @@ class LagrangianDispersion(object):
         else:
             mask = _mask.buffer(distance=0.1) # if including beached particles, consider a buffer around ocean 
 
-        ShapeMask = rasterio.features.geometry_mask(mask.to_crs(r.rio.crs).geometry,
-                                              out_shape=(len(r.lat_bin), len(r.lon_bin)),
-                                              transform=r.rio.transform(),
-                                              invert=True, all_touched=True)
-        ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
+        #ShapeMask = rasterio.features.geometry_mask(mask.to_crs(r.rio.crs).geometry,
+          #                                    out_shape=(len(r.lat_bin), len(r.lon_bin)),
+           #                                   transform=r.rio.transform(),
+             #                                 invert=True, all_touched=True)
+      #  ShapeMask = xr.DataArray(ShapeMask , dims=("lat_bin", "lon_bin"))
 
-        r = r.where(ShapeMask)
+        #r = r.where(ShapeMask)
         
         # remove extra nan values on grid (land)
         #r = r.dropna('lat_bin', 'all').dropna('lon_bin', 'all')
@@ -954,7 +956,7 @@ class LagrangianDispersion(object):
         
         return r
     
-    def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig=True):
+    def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig='thumbnail'):
         """
         Plot particle_raster outputs.
         
@@ -1033,7 +1035,7 @@ class LagrangianDispersion(object):
         lon_var = [varname for varname in r.coords if "lon" in varname][0] # find name of lon variable
         lat_var = [varname for varname in r.coords if "lat" in varname][0] # find name of lat variable
 
-        r = r.where(r>=0)
+        r = r.where(r>0)
         r = r.dropna(str(lon_var), 'all').dropna(str(lat_var), 'all')
         
         fig = plt.figure(figsize=figsize)
@@ -1070,7 +1072,7 @@ class LagrangianDispersion(object):
         plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 
         if save_fig is not None:
-         #   Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
+            #Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
             plt.savefig(str(save_fig), dpi=160, bbox_inches='tight')
 
         return fig, ax
