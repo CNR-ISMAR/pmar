@@ -33,6 +33,7 @@ import random
 import rasterio
 from rasterio.enums import Resampling
 import tempfile
+import warnings
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -42,7 +43,7 @@ PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
-
+    
 class LagrangianDispersion(object): 
     """
     Developed at CNR ISMAR in Venice.
@@ -221,7 +222,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift = 28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active'):         
+    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -527,7 +528,7 @@ class LagrangianDispersion(object):
         if q.exists() == True:
             #self.o.io_import_file(str(q)) # this is sometimes too heavy
             ps = xr.open_mfdataset(q)
-            print('NOTE: File with these configurations already exists within basedir and has been imported. Please delete the existing file to produce a new simulation.')
+            print(f'NOTE: File with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.')
 
         # otherwise, run requested simulation
         elif q.exists() == False:
@@ -672,8 +673,9 @@ class LagrangianDispersion(object):
             
             _ps = xr.open_dataset(temp_outfile) # open temporary file
             
+            
             # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
-            ps = _ps.where(_ps.status>=0).ffill('time') 
+            ps = _ps.where(_ps.status>=0).ffill('time') # remove ffill so it doesn't give massive peaks on beached particles ?
             
             # align trajectories by particles' age
             shift_by = -ps.age_seconds.argmin('time') 
@@ -696,7 +698,7 @@ class LagrangianDispersion(object):
             #self.tseed = tseed # should already be there
             
             ps.to_netcdf(str(q)) 
-        
+                    
         self.ds = ps
         
         self.particle_path = str(q) #particle_path
@@ -712,7 +714,7 @@ class LagrangianDispersion(object):
 
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='active', save_r=True):
+    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -825,7 +827,11 @@ class LagrangianDispersion(object):
             # res is now given in m
             xbin = np.append(use.x - np.diff(use.x).mean()/2, use.x[-1]+np.diff(use.x).mean()/2)
             ybin = np.append(use.y - np.diff(use.y).mean()/2, use.y[-1]+np.diff(use.y).mean()/2) 
-            
+        
+        # give 0 weight to beached particles after they have beached to avoid strange peaks
+        ds['weight'] = ds.weight.where(ds.status==0, 0)
+        
+        
         ### DECAY RATE ####
         k = decay_rate #decay coefficient given by user
         y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function 
@@ -880,16 +886,17 @@ class LagrangianDispersion(object):
         
         for i in range(0,reps):
             d = ds.where(ds.origin_marker==i).dropna('trajectory', 'all')
-            hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time')
+            hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time') 
             hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc') 
             del hh, d  
-                
+                            
         if aggregate == 'mean':    
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
         elif aggregate == 'max': 
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
         elif aggregate.startswith('p'):
-            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').quantile(eval(aggregate.split('p')[-1])/100, dim='slices').histogram_lon_lat
+            quantile = eval(aggregate.split('p')[-1])/100
+            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').load().quantile(quantile, dim='slices').histogram_lon_lat # does not work unless I .load()
         else:
             raise ValueError("'aggregate' must be one of 'mean', 'max' or 'p95'.")        
         
