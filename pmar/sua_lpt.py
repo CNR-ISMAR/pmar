@@ -74,6 +74,7 @@ class PMARCaseStudy(object):
         """
         Method returning main output of the lpt run
         """
+        #self.lpt.raster.r0.rio.to_raster(self.lpt.particle_path)
         return self.lpt.raster.r0
     
     def get_SUA_target(self):

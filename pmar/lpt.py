@@ -274,7 +274,10 @@ class LagrangianDispersion(object):
             Provide a higher value (e.g. 20) to receive less output.
         save_to : str, optional
             Name of the folder to save raster figures into. If None (default), rasters are saved within the rasters directory in basedir. 
+        plot : 
         
+        particle_status : str, optional
+            Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'active' 
         """
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
@@ -350,10 +353,12 @@ class LagrangianDispersion(object):
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
                     print(f'creating thumbnail #{i+1}...')
-
-                    self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
+                    filename = self.particle_path.split('/')[-1][:-3]
+                    #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
+                    self.raster[f'{r}'].rio.to_raster(outputdir / f'{filename}-decay_rate_{decay_rate}.tif')
                     # save corresponding thumbnails in save output directory
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
+                    #self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_{filename}-decay_rate_{decay_rate}.png')
                     
             self.outputdir = outputdir
         
