@@ -30,7 +30,7 @@ class PMARCaseStudy(object):
     particle_status : str, optional
         Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'all' 
     runtypelevel : int, optional
-    
+        Default is 3
     poly_path : str, optional
         Path to shapefile containing polygon used for particle seeding
         
@@ -45,6 +45,22 @@ class PMARCaseStudy(object):
 
     """
     def __init__(self, context, pnum=20000, duration=30, tstep=timedelta(hours=6), particle_status='all', poly_path=None):
+        """
+        Parameters
+        ----------   
+        context : str
+            String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
+        pnum : int, optional
+            The number of particles to be seeded. Default is 20000 
+        duration : int, optional
+            Integer defining the length of the particle simulation, in days. Default is 30 (for test runs)    
+        tstep : timedelta, optional
+            Time step of the OpenDrift simulation i.e., how often data is registered along the trajectory. Default is 6 hours
+        particle_status : str, optional
+            Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'all' 
+        poly_path : str, optional
+            Path to shapefile containing polygon used for particle seeding        
+        """
         self.pnum = pnum
         self.duration = duration
         self.tstep = tstep
@@ -55,12 +71,26 @@ class PMARCaseStudy(object):
         pass
 
     def get_main_output(self):
+        """
+        Method returning main output of the lpt run
+        """
         return self.lpt.raster.r0
     
     def get_SUA_target(self):
+        """
+        Method returning lpt output to run Sensitivity Analysis on
+        """
         return self.lpt.raster.r0.sum()
     
     def run(self, runtypelevel=3):
+        """
+        Method running lpt simulation with selected parameters
+        
+        Parameters
+        ----------
+        runtypelevel : int, optional
+            Default is 3
+        """
         self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path)        
         self.runtypelevel=runtypelevel
         self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status)
@@ -259,7 +289,7 @@ class PMARCaseStudySUA(CaseStudySUA):
     
     def set_problem(self):
         """
-        Method used to set the problem by adding the variables to be analysed in SUA.
+        Define the problem by giving a set of variables, their names, bounds and probability distributions. 
         
         """
         
@@ -308,8 +338,9 @@ class PMARCaseStudySUA(CaseStudySUA):
         Parameters
         ----------
         params : np.array
-        
+            Numpy array containing output of Saltelli sample for the variables defined in 'set_problem'
         module_cs : 
+            Tools4MSP case study object. In this case, PMARCaseStudy
         
         """
         
