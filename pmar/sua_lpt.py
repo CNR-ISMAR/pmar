@@ -348,7 +348,7 @@ class PMARCaseStudySUA(CaseStudySUA):
         if module_cs is None:
             module_cs = self.module_cs
             
-        module_cs.duration = int(np.round(params[0]))
+        module_cs.duration = int(np.round(params[0])) # this needs to be parametrised
         module_cs.tstep = timedelta(hours=int(np.round(params[1])))
-        module_cs.hdiff = hdiff
-        module_cs.decay_rate = decay_rate
+        module_cs.hdiff = params[2]
+        module_cs.decay_rate = params[3]
