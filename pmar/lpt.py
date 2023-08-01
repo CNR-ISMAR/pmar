@@ -4,9 +4,8 @@ import numpy as np
 import xarray as xr
 import pandas as pd
 import geopandas as gpd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from shapely.geometry import Point, Polygon
-from datetime import timedelta
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
 from opendrift.readers import reader_netCDF_CF_generic
@@ -20,7 +19,6 @@ import seaborn as sns
 spectral_r = sns.color_palette("Spectral_r", as_cmap=True)
 import cartopy.crs as ccrs
 import cartopy
-from datetime import date, timedelta
 from matplotlib.ticker import LogFormatter, PercentFormatter
 from matplotlib import ticker
 import matplotlib.pyplot as plt
@@ -33,7 +31,6 @@ import random
 import rasterio
 from rasterio.enums import Resampling
 import tempfile
-import warnings
 #from dask.distributed import Client
 #client = Client(n_workers=7, threads_per_worker=2)
 
@@ -222,7 +219,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='active'):         
+    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -673,6 +670,9 @@ class LagrangianDispersion(object):
             
             _ps = xr.open_dataset(temp_outfile) # open temporary file
             
+            # warn if wind or current velocity is all 0 (reader files not read correctly)
+            #if np.all(_ps.x_sea_water_velocity) == 0:
+            #    logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
             
             # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
             ps = _ps.where(_ps.status>=0).ffill('time') # remove ffill so it doesn't give massive peaks on beached particles ?
@@ -779,7 +779,17 @@ class LagrangianDispersion(object):
         else: 
             ds = _ds
    
-
+        # warn if wind or current velocity is all 0 (reader files not read correctly)
+        # NB: this will not work if multiple files are opened with mfdataset and only one has this issue.
+        if np.all(ds.x_sea_water_velocity).load() == 0:
+            logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
+        if np.all(ds.y_sea_water_velocity).load() == 0:
+            logger.warning('All 0 values detected for y_seawater_velocity. Expect trajectories to be affected')
+        if np.all(ds.x_wind).load() == 0:
+            logger.warning('All 0 values detected for x_wind. Expect trajectories to be affected')
+        if np.all(ds.y_wind).load() == 0:
+            logger.warning('All 0 values detected for y_wind. Expect trajectories to be affected')
+    
         ### TIME INTERPOLATION ###
         if tinterp is not None:
             new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
