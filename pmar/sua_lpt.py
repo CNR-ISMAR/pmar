@@ -11,6 +11,39 @@ from joblib import Parallel, delayed
 from copy import deepcopy
 
 class PMARCaseStudy(object):
+    """
+    Developed at CNR ISMAR in Venice.
+    Class to create a case study object under the PMAR module. 
+
+    ...
+
+    Attributes
+    ----------
+    context : str
+        String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
+    pnum : int, optional
+        The number of particles to be seeded. Default is 20000 
+    duration : int, optional
+        Integer defining the length of the particle simulation, in days. Default is 30 (for test runs)    
+    tstep : timedelta, optional
+        Time step of the OpenDrift simulation i.e., how often data is registered along the trajectory. Default is 6 hours
+    particle_status : str, optional
+        Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'all' 
+    runtypelevel : int, optional
+    
+    poly_path : str, optional
+        Path to shapefile containing polygon used for particle seeding
+        
+    Methods
+    -------
+    get_main_output()
+        Method returning main output of the lpt run
+    get_SUA_target()
+        Method returning lpt output to run Sensitivity Analysis on
+    run()
+        Method running lpt simulation with selected parameters
+
+    """
     def __init__(self, context, pnum=20000, duration=30, tstep=timedelta(hours=6), particle_status='all', poly_path=None):
         self.pnum = pnum
         self.duration = duration
@@ -100,8 +133,8 @@ class RunningStats2D:
     
 class CaseStudySUA(object):
     """
-    This is a base class for support Sensitivity and Uncertainty Analysis.
-    Child classes have to implement "set_problem" and "set_params" methods.
+    This is a base class for Sensitivity and Uncertainty Analysis.
+    Child classes have to implement the "set_problem" and "set_params" methods.
     """
     def __init__(self, module_cs, nparams=40, bygroup=True, calc_second_order=False,
                  kwargs_run={}):
@@ -210,7 +243,26 @@ class CaseStudySUA(object):
         return std/mean
 
 class PMARCaseStudySUA(CaseStudySUA):
+    """
+    Child class of CaseStudySUA for Sensitivity and Uncertainty Analysis on outputs of the PMAR module. 
+    The class defines the two methods 'set_problem' and 'set_params' specifically for PMAR Sensitivity and Uncertainty Analysis (SUA). 
+
+    ...
+
+    Methods
+    -------
+    set_problem()
+        Method used to set the problem by adding the variables to be analysed in SUA.
+    set_params()
+        Method used to correctly feed the sampled values of each variables to the lpt run. 
+    """
+    
     def set_problem(self):
+        """
+        Method used to set the problem by adding the variables to be analysed in SUA.
+        
+        """
+        
         nparams = self.nparams # ?
         module_cs = self.module_cs # ? 
         self.normalize_distance = None # ?
@@ -250,8 +302,21 @@ class PMARCaseStudySUA(CaseStudySUA):
         
     
     def set_params(self, params, module_cs=None):
+        """
+        Method used to correctly feed the sampled values of each variables to the lpt run. 
+        
+        Parameters
+        ----------
+        params : np.array
+        
+        module_cs : 
+        
+        """
+        
         if module_cs is None:
             module_cs = self.module_cs
             
         module_cs.duration = int(np.round(params[0]))
         module_cs.tstep = timedelta(hours=int(np.round(params[1])))
+        module_cs.hdiff = hdiff
+        module_cs.decay_rate = decay_rate
