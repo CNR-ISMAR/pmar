@@ -94,7 +94,7 @@ class PMARCaseStudy(object):
         """
         self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path)        
         self.runtypelevel=runtypelevel
-        self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status)
+        self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate)
         pass
 
 
@@ -326,7 +326,7 @@ class PMARCaseStudySUA(CaseStudySUA):
             #         )        
         
         self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # length of timestep in hours
-                     [0.1, 1, 0.5], # bounds
+                     [0.1, 1, 0.1], # bounds
                      'triang', # distribution
                      #group_label if self.bygroup else None
                      )
