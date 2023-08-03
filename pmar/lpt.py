@@ -674,10 +674,7 @@ class LagrangianDispersion(object):
             print('writing to netcdf...')
             
             _ps = xr.open_dataset(temp_outfile) # open temporary file
-            
-            # warn if wind or current velocity is all 0 (reader files not read correctly)
-            #if np.all(_ps.x_sea_water_velocity) == 0:
-            #    logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
+        
             
             # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
             ps = _ps.where(_ps.status>=0).ffill('time') # remove ffill so it doesn't give massive peaks on beached particles ?
@@ -786,13 +783,13 @@ class LagrangianDispersion(object):
    
         # warn if wind or current velocity is all 0 (reader files not read correctly)
         # NB: this will not work if multiple files are opened with mfdataset and only one has this issue.
-        if np.all(ds.x_sea_water_velocity).load() == 0:
+        if np.all(ds.x_sea_water_velocity.load() == 0):
             logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
-        if np.all(ds.y_sea_water_velocity).load() == 0:
+        if np.all(ds.y_sea_water_velocity.load() == 0):
             logger.warning('All 0 values detected for y_seawater_velocity. Expect trajectories to be affected')
-        if np.all(ds.x_wind).load() == 0:
+        if np.all(ds.x_wind.load() == 0):
             logger.warning('All 0 values detected for x_wind. Expect trajectories to be affected')
-        if np.all(ds.y_wind).load() == 0:
+        if np.all(ds.y_wind.load() == 0):
             logger.warning('All 0 values detected for y_wind. Expect trajectories to be affected')
     
         ### TIME INTERPOLATION ###
