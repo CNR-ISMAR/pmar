@@ -44,7 +44,7 @@ class PMARCaseStudy(object):
         Method running lpt simulation with selected parameters
 
     """
-    def __init__(self, context, pnum=20000, duration=30, tstep=timedelta(hours=6), particle_status='all', poly_path=None):
+    def __init__(self, context, pnum=20000, duration=30, tstep=timedelta(hours=6), particle_status='all', poly_path=None, basedir='lpt_output', netrc_path=None):
         """
         Parameters
         ----------   
@@ -68,6 +68,8 @@ class PMARCaseStudy(object):
         self.particle_status = particle_status
         self.runtypelevel = None
         self.poly_path = poly_path
+        self.basedir = basedir
+        self.netrc_path = netrc_path
         pass
 
     def get_main_output(self):
@@ -92,7 +94,7 @@ class PMARCaseStudy(object):
         runtypelevel : int, optional
             Default is 3
         """
-        self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path)        
+        self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir)        
         self.runtypelevel=runtypelevel
         self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate)
         pass
@@ -229,6 +231,7 @@ class CaseStudySUA(object):
         #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
         model_output_stats = RunningStats2D(percentiles=None)
         # TODO: add parallelization
+        
         def _single_run(i, params):
             module_cs = deepcopy(self.module_cs)
             self.set_params(params, module_cs=module_cs)
@@ -252,7 +255,10 @@ class CaseStudySUA(object):
         #     logger.debug('run {} target={}'.format(i, target_value))
         self.model_output_stats = model_output_stats
         self.target_values = np.array(target_values)
-
+        
+    #def existingrun(self, path):
+        
+    
     def analyze(self, calc_second_order=False):
         sa_results = sobol.analyze(self.problem,
                                    self.target_values,
