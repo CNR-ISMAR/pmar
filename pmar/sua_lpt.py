@@ -94,7 +94,7 @@ class PMARCaseStudy(object):
         runtypelevel : int, optional
             Default is 3
         """
-        self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir)        
+        self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir, netrc_path=self.netrc_path)        
         self.runtypelevel=runtypelevel
         self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate)
         pass
