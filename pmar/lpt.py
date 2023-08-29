@@ -594,8 +594,8 @@ class LagrangianDispersion(object):
                 bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
             
             elif context == 'med-cmems': # copernicus Med Sea data (stream)
-#                DATASET_ID = 'med-cmcc-cur-rean-h' #hourly
-                DATASET_ID = 'med-cmcc-cur-rean-d' #daily
+                DATASET_ID = 'med-cmcc-cur-rean-h' #hourly
+#                DATASET_ID = 'med-cmcc-cur-rean-d' #daily
                 userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
                 
