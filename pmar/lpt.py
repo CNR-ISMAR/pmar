@@ -219,7 +219,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, raster=True, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
+    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -425,7 +425,7 @@ class LagrangianDispersion(object):
     
 
     
-    def particle_simulation(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=6), hdiff=10, termvel=None, crs='4326', loglevel=40):
+    def particle_simulation(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, crs='4326', loglevel=40):
         """
         Method to start a trajectory simulation, after initial configuration, using OpenDrift by MET Norway.
         Uses OceanDrift module. 
@@ -594,8 +594,9 @@ class LagrangianDispersion(object):
                 bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
             
             elif context == 'med-cmems': # copernicus Med Sea data (stream)
-                DATASET_ID = 'med-cmcc-cur-rean-d'
-                userinfo = self.get_userinfo('med-cmcc-cur-rean-d')
+#                DATASET_ID = 'med-cmcc-cur-rean-h' #hourly
+                DATASET_ID = 'med-cmcc-cur-rean-d' #daily
+                userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
                 
                 WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
@@ -677,7 +678,7 @@ class LagrangianDispersion(object):
         
             
             # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
-            ps = _ps.where(_ps.status>=0).ffill('time') # remove ffill so it doesn't give massive peaks on beached particles ?
+            ps = _ps.where(_ps.status>=0).ffill('time') 
             
             # align trajectories by particles' age
             shift_by = -ps.age_seconds.argmin('time') 
@@ -694,7 +695,7 @@ class LagrangianDispersion(object):
                 idx = _idx.where(_idx!=0).min() # time index of first nan value across all trajectories
                 ps = ps.isel(time=slice(None, int(idx)))
             
-            # write useful time attributes
+            # write useful attributes
             ps = ps.assign_attrs({'tseed': self.tseed.total_seconds(), 'tstep': tstep.total_seconds(), 'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)})
             #self.tstep = tstep
             #self.tseed = tseed # should already be there
@@ -716,7 +717,7 @@ class LagrangianDispersion(object):
 
     
 
-    def particle_raster(self, res=3000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', save_r=True):
+    def particle_raster(self, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -827,9 +828,9 @@ class LagrangianDispersion(object):
             bds_reproj = poly.to_crs(spatial_ref).total_bounds 
             #create `weight` variable from value of `use` at starting positions of particles
             
-            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y')
+            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=np.nan).rio.reproject('epsg:4326', nodata=np.nan).sortby('x').sortby('y').fillna(0)
             
-            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) #/30/24/60/60*self.tstep.total_seconds()   # matching timestep of simulation ### NEED TO GENERALISE
+            _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) # matching timestep of simulation
             
             ds['weight'] = _weight
 
@@ -1198,3 +1199,13 @@ class LagrangianDispersion(object):
         
         pass
 
+
+    
+def check_particle_file(path_to_file):
+    ds = xr.open_dataset(path_to_file)
+    vars_to_check = ['x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind']
+    for i in vars_to_check:
+        if np.all(ds[i].load() == 0):
+            print(f'ATTENTION: all 0 values detected for variable {i}.')
+        else:
+            print(f'all good: variable {i} has non-zero values.')
