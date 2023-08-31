@@ -219,7 +219,7 @@ class LagrangianDispersion(object):
             return ''
         return f'{auth[0]}:{auth[2]}@'
     
-    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
+    def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even_dist', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -279,6 +279,10 @@ class LagrangianDispersion(object):
         particle_status : str, optional
             Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'active' 
         """
+        
+        if use_path != 'even' and use_label == 'even_dist':
+            raise ValueError('When specifying a use_path, please also specify a use_label to make the tif file recognizable.')
+        
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
         
@@ -352,13 +356,14 @@ class LagrangianDispersion(object):
                 outputdir = Path(save_to)
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
-                    print(f'creating thumbnail #{i+1}...')
+                    print(f'saving tiff file #{i+1}...')
                     filename = self.particle_path.split('/')[-1][:-3]
                     #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
-                    self.raster[f'{r}'].rio.to_raster(outputdir / f'{filename}-decay_rate_{decay_rate}.tif')
+                    self.raster[f'{r}'].rio.to_raster(outputdir / f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif')
                     # save corresponding thumbnails in save output directory
                     #self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_{filename}-decay_rate_{decay_rate}.png')
+                    print(f'saving thumbnail #{i+1}...')
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_{filename}-decay_rate_{decay_rate}-use_{use_label}.png')
                     
             self.outputdir = outputdir
         
@@ -828,7 +833,7 @@ class LagrangianDispersion(object):
             bds_reproj = poly.to_crs(spatial_ref).total_bounds 
             #create `weight` variable from value of `use` at starting positions of particles
             
-            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=np.nan).rio.reproject('epsg:4326', nodata=np.nan).sortby('x').sortby('y').fillna(0)
+            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').fillna(0)
             
             _weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) # matching timestep of simulation
             
@@ -915,7 +920,7 @@ class LagrangianDispersion(object):
         
         h = _h.transpose()   
         
-        # normalizzazione. moltiplico per pnum e divido per numero totale di celle
+        # normalizzazione. divido per pnum e moltiplico per numero totale di celle
         #tot_cells = len(h.stack(box=('lon_bin', 'lat_bin')).dropna('box'))
         #tot_cells = h.where(np.isnan(h),1).sum().load()
         tot_cells = int(h.count().load())
