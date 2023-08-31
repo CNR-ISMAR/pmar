@@ -590,7 +590,7 @@ class LagrangianDispersion(object):
                 userinfo = self.get_userinfo('my.cmems-du.eu')
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' 
+                WIND_ID = 'cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H' 
                 wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
                 
                 mld_ID = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'#'bs-cmcc-mld-rean-d'
@@ -604,8 +604,8 @@ class LagrangianDispersion(object):
                 userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
-                wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
+                WIND_ID = 'cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H'              
+                wind_path = f'https://{userinfo}nrt.cmems-du.eu/thredds/dodsC/{WIND_ID}'
             
                 mld_ID = 'med-cmcc-mld-rean-d'
                 mld_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'      
