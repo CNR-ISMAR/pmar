@@ -156,7 +156,7 @@ class LagrangianDispersion(object):
             Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
             poly = gpd.read_file(poly_path)
             bds = np.round(poly.total_bounds, 4) 
-            local_poly = f'polygon-crs_epsg:{poly.crs.to_epsg()}-lon_{bds[0]}_{bds[2]}-lat—{bds[1]}_{bds[3]}.shp'
+            local_poly = f'polygon-crs_epsg:{poly.crs.to_epsg(4326)}-lon_{bds[0]}_{bds[2]}-lat—{bds[1]}_{bds[3]}.shp'
             q = self.basedir / 'polygons' / local_poly
             poly.to_file(str(q), driver='ESRI Shapefile')
             self.poly_path = str(q)
@@ -177,26 +177,34 @@ class LagrangianDispersion(object):
             for c in avail_contexts:
                 if c in self.particle_path:
                     self.context = c
+            
+            ## extract info from filename (BAD)
+            if type(self.particle_path) == str:
+                ppath = self.particle_path 
+            else:
+                ppath = self.particle_path[0]
                 
-            self.depth = self.particle_path.split('depth_')[1][0] == 'T'  
+            self.depth = ppath.split('depth_')[1][0] == 'T'  # THIS IS BAD. does not work if particle_path is a list of files
             
-            if self.particle_path.find('tseed') != -1:
-                self.tseed = timedelta(seconds=float(self.particle_path.split('tseed_')[1].split('s')[0]))
+            if ppath.find('tseed') != -1:
+                self.tseed = timedelta(seconds=float(ppath.split('tseed_')[1].split('s')[0]))
             
-            self.tstep = timedelta(seconds=float(self.particle_path.split('tstep_')[1].split('s')[0]))
+            self.tstep = timedelta(seconds=float(ppath.split('tstep_')[1].split('s')[0]))
             
-            self.pnum = int(self.particle_path.split('pnum_')[1].split('-')[0])
+            self.pnum = int(ppath.split('pnum_')[1].split('-')[0])
             
             # load opendrift dataset.  
-            if type(self.particle_path) == dict: 
+            if type(self.particle_path) == dict:  # transform to list
+                
                 for i in self.particle_path:
                     path_list = self.particle_path
                     path_list[i] = str(path_list[i])
                 
                 paths = path_list.values()
             else:
-                paths = str(self.particle_path)
-            
+                #paths = str(self.particle_path)
+                paths = self.particle_path
+                
             ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
 
             ds['trajectory'] = np.arange(0, len(ds.trajectory)) # give trajectories unique ID  
@@ -218,6 +226,17 @@ class LagrangianDispersion(object):
         if auth is None:
             return ''
         return f'{auth[0]}:{auth[2]}@'
+    
+
+    def get_raster_paths(self, decay_rate, use_label='even_dist'): # 
+        if self.particle_path is None:
+            raise ValueError('particle file not found')
+        
+        filename = self.particle_path.split('/')[-1][:-3]
+                    #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
+        raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif'
+        return raster_paths
+
     
     def run(self, reps=1, tshift=28, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even_dist', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
         """
@@ -280,6 +299,7 @@ class LagrangianDispersion(object):
             Filter particles based on their status at the end of the run i.e., whether they are still active or have beached or sunk. Options are ['all', 'stranded', 'seafloor', 'active'], Default is 'active' 
         """
         
+        
         if use_path != 'even' and use_label == 'even_dist':
             raise ValueError('When specifying a use_path, please also specify a use_label to make the tif file recognizable.')
         
@@ -331,8 +351,20 @@ class LagrangianDispersion(object):
             else:
                 self.particle_path = particle_list
 
+        if save_to is None:
+            Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
+            outputdir = self.basedir / 'rasters'
+        else:
+            Path(save_to).mkdir(parents=True, exist_ok=True)
+            outputdir = Path(save_to)
+        self.outputdir = outputdir
+        
+        raster_exists = Path(self.get_raster_paths(decay_rate, use_label)).exists()
+        if raster_exists:
+            print('raster file with these configurations already exists')
+        
         # compute raster
-        if raster == True:
+        if raster == True and not raster_exists:
             if type(use_path) == str:
                 r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
                 #self.raster = r
@@ -348,24 +380,21 @@ class LagrangianDispersion(object):
                 raise ValueError('"use_path" not recognised. "use_path" must be either a string or list of strings containing path(s) to use layers.')
         
             # save final raster(s) and delete temporary files
-            if save_to is None:
-                Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
-                outputdir = self.basedir / 'rasters'
-            else:
-                Path(save_to).mkdir(parents=True, exist_ok=True)
-                outputdir = Path(save_to)
+
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
                     print(f'saving tiff file #{i+1}...')
-                    filename = self.particle_path.split('/')[-1][:-3]
+                    raster_path = self.get_raster_paths(decay_rate, use_label)
+                    #filename = self.particle_path.split('/')[-1][:-3]
                     #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
-                    self.raster[f'{r}'].rio.to_raster(outputdir / f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif')
+                    self.raster[f'{r}'].rio.to_raster(f'{str(self.outputdir)}/{raster_path}') ###### WARNING: NEL CASO DI PIù USI DI INPUT VIENE SOVRASCRITTO, CORREGGI
                     # save corresponding thumbnails in save output directory
                     #self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
                     print(f'saving thumbnail #{i+1}...')
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_{filename}-decay_rate_{decay_rate}-use_{use_label}.png')
-                    
-            self.outputdir = outputdir
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(self.outputdir)}/thumbnail_{raster_path[:-4]}.png')
+
+        elif raster == True and raster_exists: 
+            self.raster['r0'] = rxr.open_rasterio(Path(self.get_raster_paths(decay_rate, use_label))).isel(band=0).rename({'x': 'lon_bin', 'y': 'lat_bin'})
         
         
         return self
@@ -590,7 +619,7 @@ class LagrangianDispersion(object):
                 userinfo = self.get_userinfo('my.cmems-du.eu')
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H' 
+                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' 
                 wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
                 
                 mld_ID = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'#'bs-cmcc-mld-rean-d'
@@ -604,7 +633,7 @@ class LagrangianDispersion(object):
                 userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
                 uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H'              
+                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
                 wind_path = f'https://{userinfo}nrt.cmems-du.eu/thredds/dodsC/{WIND_ID}'
             
                 mld_ID = 'med-cmcc-mld-rean-d'
@@ -671,11 +700,16 @@ class LagrangianDispersion(object):
             
             self.o.run(duration=duration, #end_time=end_time, 
                        time_step=time_step, #time_step_output=timedelta(hours=24), 
-                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'sea_floor_depth_below_sea_level', 'age_seconds', 'origin_marker', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind', 'ocean_mixed_layer_thickness'])
+                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker'])# file was getting too big, 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness'])
             
             elapsed = (T.time() - t_0)
             print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
-
+            
+            
+            #### CHECK HERE IF READERS WERE PROCESSED CORRECTLY ####
+            if hasattr(self.o, 'discarded_readers'):
+                logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
+            
             #### A BIT OF POST-PROCESSING ####
             print('writing to netcdf...')
             
@@ -789,14 +823,14 @@ class LagrangianDispersion(object):
    
         # warn if wind or current velocity is all 0 (reader files not read correctly)
         # NB: this will not work if multiple files are opened with mfdataset and only one has this issue.
-        if np.all(ds.x_sea_water_velocity.load() == 0):
-            logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
-        if np.all(ds.y_sea_water_velocity.load() == 0):
-            logger.warning('All 0 values detected for y_seawater_velocity. Expect trajectories to be affected')
-        if np.all(ds.x_wind.load() == 0):
-            logger.warning('All 0 values detected for x_wind. Expect trajectories to be affected')
-        if np.all(ds.y_wind.load() == 0):
-            logger.warning('All 0 values detected for y_wind. Expect trajectories to be affected')
+        #if np.all(ds.x_sea_water_velocity.load() == 0):
+         #   logger.warning('All 0 values detected for x_seawater_velocity. Expect trajectories to be affected')
+        #if np.all(ds.y_sea_water_velocity.load() == 0):
+         #   logger.warning('All 0 values detected for y_seawater_velocity. Expect trajectories to be affected')
+        #if np.all(ds.x_wind.load() == 0):
+         #   logger.warning('All 0 values detected for x_wind. Expect trajectories to be affected')
+        #if np.all(ds.y_wind.load() == 0):
+         #   logger.warning('All 0 values detected for y_wind. Expect trajectories to be affected')
     
         ### TIME INTERPOLATION ###
         if tinterp is not None:
