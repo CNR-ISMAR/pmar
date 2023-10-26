@@ -9,6 +9,7 @@ from SALib.sample import saltelli
 from SALib.analyze import sobol
 from joblib import Parallel, delayed
 from copy import deepcopy
+import rioxarray as rxr
 
 class PMARCaseStudy(object):
     """
@@ -61,6 +62,7 @@ class PMARCaseStudy(object):
         poly_path : str, optional
             Path to shapefile containing polygon used for particle seeding        
         """
+        self.lpt = None
         self.pnum = pnum
         self.duration = duration
         self.tstep = tstep
@@ -239,6 +241,7 @@ class CaseStudySUA(object):
             model_output = module_cs.get_main_output()
             model_output_stats.push(model_output)
             target_value = module_cs.get_SUA_target()
+            #target_value = 1
             #logger.debug('run {} target={}'.format(i, target_value))
             return target_value
             
@@ -257,6 +260,42 @@ class CaseStudySUA(object):
         self.target_values = np.array(target_values)
         
     #def existingrun(self, path):
+        
+    def readall(self, path_to_output, njobs=1):
+        """ 
+        Read previously made outputs. Feeds model_output directly.
+        
+        Parameters
+        ----------
+        path_to_output : str
+            String containing the path to the output files to be analysed.
+        """
+        self.set_problem()
+        #samples = self.sample(nruns, calc_second_order)
+        #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
+        model_output_stats = RunningStats2D(percentiles=None)
+        
+        # TODO: add parallelization
+        
+        def _single_run(i, outputs):
+            module_cs = deepcopy(self.module_cs)
+            #self.set_params(params, module_cs=module_cs)
+            #module_cs.run(runtypelevel=0, **self.kwargs_run)
+            model_output = rxr.open_rasterio(outputs).isel(band=0).drop('band')
+            model_output_stats.push(model_output)
+            target_value = model_output.sum()
+            #logger.debug('run {} target={}'.format(i, target_value))
+            return target_value
+            
+        with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
+            target_values = parallel(delayed(_single_run)(i, outputs) for i, outputs in enumerate(path_to_output))
+                
+        #for i, outputs in enumerate(path_to_output):
+         #   target_values = _single_run(i, outputs)
+            
+        self.model_output_stats = model_output_stats
+        self.target_values = np.array(target_values)        
+                
         
     
     def analyze(self, calc_second_order=False):
@@ -314,24 +353,24 @@ class PMARCaseStudySUA(CaseStudySUA):
                      )
 
         self.add_problem_var(['time_var', 'tstep', 'tstep'], # length of timestep in hours
-                     [6, 24], # bounds
+                     [4, 24], # bounds
                      'unif', # distribution
                      #group_label if self.bygroup else None
                      )
         
-        self.add_problem_var(['hdiff', 'hdiff', 'hdiff'], # length of timestep in hours
+        self.add_problem_var(['hdiff', 'hdiff', 'hdiff'], # horizontal diffusivity
                      [5, 15, 0.5], # bounds
                      'triang', # distribution
                      #group_label if self.bygroup else None
                      )
         
-        #self.add_problem_var(['termvel', 'termvel', 'termvel'], # length of timestep in hours
+        #self.add_problem_var(['termvel', 'termvel', 'termvel'], # 
          #            [1e-3, 1e-2], # bounds
           #           'unif', # distribution
            #          #group_label if self.bygroup else None
             #         )        
         
-        self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # length of timestep in hours
+        self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # 
                      [0.1, 1, 0.1], # bounds
                      'triang', # distribution
                      #group_label if self.bygroup else None
