@@ -45,14 +45,14 @@ class PMARCaseStudy(object):
         Method running lpt simulation with selected parameters
 
     """
-    def __init__(self, context, pnum=20000, duration=30, tstep=timedelta(hours=6), particle_status='all', poly_path=None, basedir='lpt_output', netrc_path=None):
+    def __init__(self, context, ptot=1000, particle_status='all', poly_path=None, basedir='lpt_output', netrc_path=None, loglevel=40):
         """
         Parameters
         ----------   
         context : str
             String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
-        pnum : int, optional
-            The number of particles to be seeded. Default is 20000 
+        ptot : int, optional
+            Total number of particles forming raster, i.e. sum of pnum in each rep. Default is 100 (for test runs)
         duration : int, optional
             Integer defining the length of the particle simulation, in days. Default is 30 (for test runs)    
         tstep : timedelta, optional
@@ -63,15 +63,19 @@ class PMARCaseStudy(object):
             Path to shapefile containing polygon used for particle seeding        
         """
         self.lpt = None
-        self.pnum = pnum
-        self.duration = duration
-        self.tstep = tstep
+        #self.pnum = pnum
+        self.duration = None
+        self.tstep = None
         self.context = context
         self.particle_status = particle_status
         self.runtypelevel = None
         self.poly_path = poly_path
         self.basedir = basedir
         self.netrc_path = netrc_path
+        self.tshift = None
+        self.ptot = ptot
+        self.reps = None # NUMBER OF REPS DEPENDS ON HOW MANY WE CAN FIT IN A YEAR WITH THAT TSHIFT
+        self.loglevel = loglevel
         pass
 
     def get_main_output(self):
@@ -98,7 +102,7 @@ class PMARCaseStudy(object):
         """
         self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir, netrc_path=self.netrc_path)        
         self.runtypelevel=runtypelevel
-        self.lpt.run(pnum=self.pnum, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate)
+        self.lpt.repeat_run(reps=int(np.round(365/self.tshift)), tshift=self.tshift, ptot=self.ptot, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate, loglevel=self.loglevel)
         pass
 
 
@@ -370,12 +374,17 @@ class PMARCaseStudySUA(CaseStudySUA):
            #          #group_label if self.bygroup else None
             #         )        
         
-        self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # 
+        self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # decay rate
                      [0.1, 1, 0.1], # bounds
                      'triang', # distribution
                      #group_label if self.bygroup else None
                      )
         
+        self.add_problem_var(['time_var', 'tshift', 'tshift'], # time shift between each rep
+                     [18, 90, 0.5], # bounds
+                     'triang', # distribution
+                     #group_label if self.bygroup else None
+                     )        
     
     def set_params(self, params, module_cs=None):
         """
@@ -397,3 +406,4 @@ class PMARCaseStudySUA(CaseStudySUA):
         module_cs.tstep = timedelta(hours=int(np.round(params[1])))
         module_cs.hdiff = params[2]
         module_cs.decay_rate = params[3]
+        module_cs.tshift = params[4]
