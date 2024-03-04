@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, date
 from shapely.geometry import Point, Polygon
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
-from opendrift.readers import reader_netCDF_CF_generic
+#from opendrift.readers import reader_netCDF_CF_generic
+import copernicusmarine
+from opendrift.readers.reader_netCDF_CF_generic import Reader
 import opendrift
 from pydap.client import open_url
 from pydap.cas.get_cookies import setup_session
@@ -33,6 +35,8 @@ from rasterio.enums import Resampling
 import tempfile
 from cachetools import LRUCache
 from netCDF4 import Dataset
+import hashlib
+import json
 
 logger = logging.getLogger("LagrangianDispersion")
 
@@ -40,7 +44,36 @@ PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
+class PMARCache(object):
+    def __init__(self, cachedir): # cachedir è una sottodirectory di basedir
+        self.cachedir = Path(cachedir)
+        self.cachedir.mkdir(exist_ok=True)
+        
+    def get_data_file(self, extension, **kwargs):
+        _data_file = hashlib.md5(str(sorted(kwargs.items())).encode('utf-8')).hexdigest()
+        data_file = f"{_data_file}.{str(extension)}" # chiave della cache e nome del file, generalizzata sia per particle_simulation che particle_raster
+        path_data_file = Path(self.cachedir) / data_file 
+        return path_data_file
     
+    def set_metadata(self, extension, **kwargs):
+        path_data_file = self.get_data_file(extension, **kwargs)
+        path_metadata_file = str(path_data_file) + '_metadata' #TODO rendere più robusto
+        with open(path_metadata_file,'w') as fi:
+            json.dump(kwargs,fi,default=str)
+            
+    def particle_cache(self, poly_path, pnum, start_time, season, duration_days, s_bounds, z, tstep, hdiff, termvel, crs):
+        cache_key = {'poly_path': poly_path, 'pnum': pnum, 'start_time': start_time, 'season': season, 'duration_days': duration_days, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs}
+        path_data_file = self.get_data_file('nc', **cache_key) # chiave della cache e nome del file
+        self.set_metadata('nc', **cache_key) #TODO spostare
+        return path_data_file, path_data_file.exists()
+        
+    def raster_cache(self, poly_path, pnum, ptot, duration_days, s_bounds, z, tstep, hdiff, termvel, crs, tinterp, r_bounds, use_path, decay_rate, aggregate, depth_layer, z_bounds, particle_status):
+        cache_key = {'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration_days': duration_days, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs, 'tinterp': tinterp, 'r_bounds': r_bounds, 'use_path': use_path, 'decay_rate': decay_rate, 'aggregate':aggregate, 'depth_layer': depth_layer, 'z_bounds': z_bounds, 'particle_status': particle_status}
+        path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
+        self.set_metadata('tif', **cache_key) #TODO spostare
+        return path_data_file, path_data_file.exists()
+    
+        
 class LagrangianDispersion(object): 
     """
     Developed at CNR ISMAR in Venice.
@@ -134,7 +167,8 @@ class LagrangianDispersion(object):
         self.particle_status = None
         self.reps = None
         self.tshift = None
-        self.cache = LRUCache(maxsize=128) # testing cache
+        self.cache = PMARCache(Path(basedir) / 'cachedir')
+        self.raster_path = None
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -195,24 +229,6 @@ class LagrangianDispersion(object):
             
             self.pnum = int(ppath.split('pnum_')[1].split('-')[0])
             
-            # load opendrift dataset.  
-            #if type(self.particle_path) == dict:  # transform to list
-                
-           #     for i in self.particle_path:
-               #     path_list = self.particle_path
-                #    path_list[i] = str(path_list[i])
-                
-                #paths = path_list.values()
-            #else:
-                #paths = str(self.particle_path)
-             #   paths = self.particle_path
-                
-            #ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
-
-            #ds['trajectory'] = np.arange(0, len(ds.trajectory)) # give trajectories unique ID  
-    
-            #self.ds = ds
-            
             self.get_ds
             
             # if a particle_path is given, meaning a run with those configs already exists, the poly_path contained in the file's attributes "wins" over poly_path
@@ -232,30 +248,31 @@ class LagrangianDispersion(object):
         return f'{auth[0]}:{auth[2]}@'
     
     #### testing cachetools
-    def _file_exists(self):
-        try:
-            with Dataset(self.particle_path, 'r'):
-                return True
-        except FileNotFoundError:
-            return False   
+    #def _file_exists(self):
+     #   try:
+      #      with Dataset(self.particle_path, 'r'):
+       #         return True
+        #except FileNotFoundError:
+         #   return False   
+    
     
     ###### TODO: the filename used for the raster file is misleading with this method, if reps>1. ####### 
-    def get_raster_paths(self, decay_rate, reps=None, tshift=None, use_label='even'): # 
-        if self.particle_path is None:
-            raise ValueError('particle file not found')
+    #def get_raster_paths(self, decay_rate, reps=None, tshift=None, use_label='even'): # 
+     #   if self.particle_path is None:
+      #      raise ValueError('particle file not found')
         
-        if type(self.particle_path) is str:
-            filename = self.particle_path.split('/')[-1].split('-marker')[0]
+       # if type(self.particle_path) is str:
+        #    filename = self.particle_path.split('/')[-1].split('-marker')[0]
             
-        else:
-            filename = self.particle_path[0].split('/')[-1].split('-marker')[0]
+        #else:
+         #   filename = self.particle_path[0].split('/')[-1].split('-marker')[0]
         
-        raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif'
+        #raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif'
         
-        if reps is not None:
-            raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}-totreps_{reps}-tshift_{tshift}.tif'
+        #if reps is not None:
+         #   raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}-totreps_{reps}-tshift_{tshift}.tif'
         
-        return raster_paths
+        #return raster_paths
     
     @property
     def get_ds(self):
@@ -278,14 +295,15 @@ class LagrangianDispersion(object):
         self.ptot = ptot
         particle_dict = {}
         
+                # commented as now everything goes into cachedir
         ##### THIS COULD PROBS GO IN INIT. for now copied from .run()
-        if save_to is None:
-            Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
-            outputdir = self.basedir / 'rasters'
-        else:
-            Path(save_to).mkdir(parents=True, exist_ok=True)
-            outputdir = Path(save_to)
-        self.outputdir = outputdir
+        #if save_to is None:
+         #   Path(self.basedir / 'rasters').mkdir(parents=True, exist_ok=True)
+          #  outputdir = self.basedir / 'rasters'
+        #else:
+         #   Path(save_to).mkdir(parents=True, exist_ok=True)
+          #  outputdir = Path(save_to)
+        #self.outputdir = outputdir
         ###############################
         
         
@@ -302,18 +320,19 @@ class LagrangianDispersion(object):
             
             self.particle_simulation(pnum=int(np.round(self.ptot/self.reps)), start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
             particle_dict[n] = self.particle_path
-            #print(self.o)
+            print(self.o)
             print(f'----- DONE WITH REP #{n+1} -----')
             
         self.particle_path = list(particle_dict.values())
         self.origin_marker = np.arange(0,reps)
         
-        # not needed because it is already in raster method
-        #self.get_ds() # get aggregated ds of all runs to compute raster
+        #raster_exists = Path(self.get_raster_paths(decay_rate, reps, tshift, use_label)).exists()
+        #if raster_exists:
+         #   print('raster file with these configurations already exists')
         
-        raster_exists = Path(self.get_raster_paths(decay_rate, reps, tshift, use_label)).exists()
-        if raster_exists:
-            print('raster file with these configurations already exists')
+        raster_path, raster_exists = self.cache.raster_cache(poly_path=self.poly_path, pnum=None, ptot=ptot, duration_days=duration_days, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
+        
+        self.raster_path = raster_path
         
         print('STARTING RASTER COMPUTATION')
         # compute raster
@@ -336,17 +355,14 @@ class LagrangianDispersion(object):
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
                     print(f'saving tiff file #{i+1}...')
-                    raster_path = self.get_raster_paths(decay_rate, reps, tshift, use_label)
-                    #filename = self.particle_path.split('/')[-1][:-3]
-                    #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
-                    self.raster[f'{r}'].rio.to_raster(f'{str(self.outputdir)}/{raster_path}') ###### WARNING: NEL CASO DI PIù USI DI INPUT VIENE SOVRASCRITTO, CORREGGI
+                    self.raster[f'{r}'].rio.to_raster(str(raster_path)) ###### WARNING: NEL CASO DI PIù USI DI INPUT VIENE SOVRASCRITTO, CORREGGI
                     # save corresponding thumbnails in save output directory
-                    #self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
                     print(f'saving thumbnail #{i+1}...')
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(self.outputdir)}/thumbnail_{raster_path[:-4]}.png')
+                    self.plot(r=self.raster[f'{r}'], save_fig=f'{raster_path}_{i}_thumbnail.png')
 
         elif raster == True and raster_exists: 
-            self.raster['r0'] = rxr.open_rasterio(Path(self.get_raster_paths(decay_rate, reps, tshift, use_label))).isel(band=0).rename({'x': 'lon_bin', 'y': 'lat_bin'})
+            self.raster = xr.Dataset()
+            self.raster['r0'] = rxr.open_rasterio(raster_path).isel(band=0).rename({'x': 'lon_bin', 'y': 'lat_bin'}).assign_attrs({'use_path': use_path})
         
 
         return self
@@ -436,32 +452,6 @@ class LagrangianDispersion(object):
             #logger.debug('Run starting')
                 
             self.pnum = pnum
-            # this gives the option of doing e.g. monthly runs to avoid crashing when seeding a lot of particles. 
-            #time = [t0.strftime('%Y-%m-%d'), t1.strftime('%Y-%m-%d')]
-            #iter_dt = t1-t0
-            #particle_list = {}
-
-            # instead, split into smaller batches of particles (rather than time segments).
-            # repeat run gives the number of times that exact same run has to be repeated. this coefficient is saved in 'origin_marker', which now appears in particle_path. 
-            
-            ### di default, ogni run è shiftata di 28 giorni rispetto alla precedente (scelta empirica)
-            #tshift = timedelta(days=tshift)
-            
-            #for n in range(0, reps):
-             #   print(f'----- STARTING RUN #{n+1} -----')
-              #  if n==0:
-               #     t0 = datetime.strptime(start_time, '%Y-%m-%d')
-               # else:
-                #    t0 = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)
-
-                #start_time = t0.strftime("%Y-%m-%d")
-                
-               # self.origin_marker = n 
-                
-                #self.particle_simulation(pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)    
-                #particle_list[n] = self.particle_path
-                #print(self.o)
-                #print(f'----- DONE WITH RUN #{n+1} -----')
             
             
             print(f'----- STARTING RUN -----')
@@ -469,11 +459,7 @@ class LagrangianDispersion(object):
             start_time = t0.strftime("%Y-%m-%d")
             self.origin_marker = 0
             self.particle_simulation(pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, crs=crs, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, loglevel=loglevel)
-            
-            #if len(particle_list) == 1:
-             #   self.particle_path == list(particle_list.values())[0]
-            #else:
-             #   self.particle_path = particle_list
+      
         
         
         ##### THIS COULD PROBS GO IN INIT. for now copying it also in repeat_run
@@ -486,9 +472,7 @@ class LagrangianDispersion(object):
         self.outputdir = outputdir
         ###############################
         
-        raster_exists = Path(self.get_raster_paths(decay_rate, reps, tshift, use_label)).exists()
-        if raster_exists:
-            print('raster file with these configurations already exists')
+        raster_path, raster_exists = self.cache.raster_cache(poly_path=self.poly_path, pnum=pnum, ptot=None, duration_days=duration_days, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
         
         print('STARTING RASTER COMPUTATION')
         # compute raster
@@ -511,17 +495,18 @@ class LagrangianDispersion(object):
 
             for i, r in enumerate(self.raster.data_vars): # save all available rasters in output directory
                     print(f'saving tiff file #{i+1}...')
-                    raster_path = self.get_raster_paths(decay_rate, reps, tshift, use_label)
+                    #raster_path = self.get_raster_paths(decay_rate, reps, tshift, use_label)
                     #filename = self.particle_path.split('/')[-1][:-3]
                     #self.raster[f'{r}'].rio.to_raster(outputdir / f'raster_{i+1}.tif')
-                    self.raster[f'{r}'].rio.to_raster(f'{str(self.outputdir)}/{raster_path}') ###### WARNING: NEL CASO DI PIù USI DI INPUT VIENE SOVRASCRITTO, CORREGGI
+                    self.raster[f'{r}'].rio.to_raster(raster_path) ###### WARNING: NEL CASO DI PIù USI DI INPUT VIENE SOVRASCRITTO, CORREGGI
                     # save corresponding thumbnails in save output directory
                     #self.plot(r=self.raster[f'{r}'], save_fig=f'{str(outputdir)}/thumbnail_raster_{i+1}.png')
                     print(f'saving thumbnail #{i+1}...')
-                    self.plot(r=self.raster[f'{r}'], save_fig=f'{str(self.outputdir)}/thumbnail_{raster_path[:-4]}.png')
+                    self.plot(r=self.raster[f'{r}'])#, save_fig=f'{str(self.outputdir)}/thumbnail_{raster_path[:-4]}.png')
 
         elif raster == True and raster_exists: 
-            self.raster['r0'] = rxr.open_rasterio(Path(self.get_raster_paths(decay_rate, reps, tshift, use_label))).isel(band=0).rename({'x': 'lon_bin', 'y': 'lat_bin'})
+            self.raster = xr.Dataset()
+            self.raster['r0'] = rxr.open_rasterio(raster_path).isel(band=0).rename({'x': 'lon_bin', 'y': 'lat_bin'})
         
         
         return self
@@ -639,7 +624,8 @@ class LagrangianDispersion(object):
             raise ValueError(f"Unsupported context given. Context variable must be one of {avail_contexts}")
         self.context = context
         
-        Path(self.basedir / 'particles').mkdir(parents=True, exist_ok=True)
+        # commented as now everything goes into cachedir
+        #Path(self.basedir / 'particles').mkdir(parents=True, exist_ok=True)
         
         ### time settings ####
         ssns = {'summer': datetime(2019,6,1),
@@ -677,29 +663,6 @@ class LagrangianDispersion(object):
         bds = np.round(poly.total_bounds, 4) # only used in particle_path
         t0 = start_time.strftime('%Y-%m-%d')
         t1 = end_time.strftime('%Y-%m-%d')
-        #particle_path = f'{str(self.context)}-lon_{bds[0]}-{bds[2]}_lat_{bds[1]}-{bds[3]}-time_{t0}_to_{t1}-pnum_{pnum}-tstep_{int(tstep.total_seconds())}s-tseed_{int(self.tseed.total_seconds())}s-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}-marker_{str(self.origin_marker)}.nc'
-        # changing this to contain start time and duration, to be more consistent with raster_path and reps
-        particle_path = f'{str(self.context)}-lon_{bds[0]}-{bds[2]}_lat_{bds[1]}-{bds[3]}-starttime_{t0}_dur_{duration_days}-pnum_{pnum}-tstep_{int(tstep.total_seconds())}s-tseed_{int(self.tseed.total_seconds())}s-hdiff_{hdiff}-termvel_{termvel}-depth_{str(self.depth)}-marker_{str(self.origin_marker)}.nc'
-        q =  self.basedir / 'particles' / particle_path
-        self.particle_path = str(q) #particle_path
-
-        ### testing cachetools#####
-        # this works:
-        #if self._file_exists():
-         #   print(f"File '{self.particle_path}' already exists. Skipping creation.")
-                
-        # Check the cache before creating the file
-        cache_key = {'pnum': pnum, 'start_time': start_time, 'season': season, 'duration_days': duration_days, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs}
-        
-        print('type', type(cache_key))
-        print(cache_key)
-        print(self.cache)
-        if cache_key.values() in self.cache:
-            print("Data already processed. Skipping file creation.")
-        else:
-            print(f'cache test failed. {self.cache}')
-        ###########################
-        
         
         # initialise OpenDrift object
         if self.pressure == 'oil':
@@ -707,15 +670,18 @@ class LagrangianDispersion(object):
         else:
             self.o = OceanDrift(loglevel=loglevel) 
         
-
+        
+        file_path, file_exists = self.cache.particle_cache(poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs)
+        
         # if a file with that name already exists, simply import it  
-        if q.exists() == True:
+        if file_exists == True:
             #self.o.io_import_file(str(q)) # this is sometimes too heavy
-            ps = xr.open_mfdataset(q)
-            print(f'NOTE: File with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.')
+            #print('about to aggregate the following files:', file_path)
+            ps = xr.open_mfdataset(file_path)
+            print(f'NOTE: File with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant now with cachedir
 
         # otherwise, run requested simulation
-        elif q.exists() == False:
+        elif file_exists == False:
             print('adding landmask...')
             # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
             shpfilename = shpreader.natural_earth(resolution='10m',
@@ -723,15 +689,10 @@ class LagrangianDispersion(object):
                                     name='admin_0_countries')
             reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
             
-            # opendrift landmask
-            #from opendrift.readers import reader_global_landmask
-            #reader_landmask = reader_global_landmask.Reader()
-            #           extent=[2, 59, 8, 63]) #can also specify extent if needed
-            
             self.o.add_reader([reader_landmask])
             self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
             
-            # import relevant readers based on context
+            # bridge-bs context is VERY OLD, NEEDS FIXING. import relevant readers based on context
             if context == 'bridge-bs': # local WP2 data
                 
                 if self.localdatadir is None:
@@ -760,47 +721,73 @@ class LagrangianDispersion(object):
                 wind_path = list(windpaths.values())
                 bathy_path = str(bridge_dir / 'bs_bathymetry.nc')
                 
-            elif context == 'bs-cmems': # copernicus Black Sea data (stream)
-                DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m'
-                userinfo = self.get_userinfo('my.cmems-du.eu')
-                uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'
+            elif context == 'bs-cmems': # copernicus Black Sea data (remote connection)
+                ocean_id = "cmems_mod_blk_phy-cur_my_2.5km_P1D-m"
+                wind_id = "cmems_obs-wind_glo_phy_my_l4_P1M" # this is a global reanalysis product, so same in all contexts
+                mld_id = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'
+                bathy_id = 'cmems_mod_glo_phy_my_0.083deg_static' # this is a global reanalysis product, so same in all contexts
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' 
-                wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
+                #DATASET_ID = 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m'
+                #userinfo = self.get_userinfo('my.cmems-du.eu')
+                #uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'
                 
-                mld_ID = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'#'bs-cmcc-mld-rean-d'
-                mld_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'        
+                #WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M' 
+                #wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
                 
-                bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
+                #mld_ID = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'#'bs-cmcc-mld-rean-d'
+                #mld_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'        
+                
+                #bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
             
-            elif context == 'med-cmems': # copernicus Med Sea data (stream)
-                DATASET_ID = 'med-cmcc-cur-rean-h' #hourly
+            elif context == 'med-cmems': # copernicus Med Sea data (remote connection)
+                ocean_id = "med-cmcc-cur-rean-h"
+                wind_id = "cmems_obs-wind_glo_phy_my_l4_P1M" # this is a global reanalysis product, so same in all contexts
+                mld_id = 'med-cmcc-mld-rean-d'
+                bathy_id = 'cmems_mod_glo_phy_my_0.083deg_static' # this is a global reanalysis product, so same in all contexts
+                
+                #DATASET_ID = 'med-cmcc-cur-rean-h' #hourly
 #                DATASET_ID = 'med-cmcc-cur-rean-d' #daily
-                userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
-                uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
+                #userinfo = self.get_userinfo('my.cmems-du.eu') # is this correct?
+                #uv_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{DATASET_ID}'                
                 
-                WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
-                wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
+                #WIND_ID = 'cmems_obs-wind_glo_phy_my_l4_P1M'              
+                #wind_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{WIND_ID}'
             
-                mld_ID = 'med-cmcc-mld-rean-d'
-                mld_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'      
+                #mld_ID = 'med-cmcc-mld-rean-d'
+                #mld_path = f'https://{userinfo}my.cmems-du.eu/thredds/dodsC/{mld_ID}'      
                 
-                bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
+                #bathy_path = '/home/sbosi/data/input/bathymetry_gebco_2022_n46.8018_s29.1797_w-6.5918_e43.8574.nc'
 
             else:
                 raise ValueError("Unsupported context. Please choose one of 'bridge-bs', 'bs-cmems' or 'med-cmems'.")
 
-            print('adding ocean readers...')
-            self.o.add_readers_from_list(uv_path, lazy=True) 
-            print('adding wind readers...')
-            self.o.add_readers_from_list(wind_path, lazy=True) # add reader from local file
-            
+            reader_ids = [ocean_id, wind_id] # list of copernicus product ids, including bathymetry and mld if simulation is 3D
             if self.depth == True:
-                print('adding mixed layer readers...')
-                self.o.add_readers_from_list(mld_path, lazy=True) # add reader from local file
-                print('adding bathymetry readers...')
-                bathy_reader = reader_netCDF_CF_generic.Reader(self.bathy_path)
-                self.o.add_reader(bathy_reader)
+                reader_ids.append(mld_id)
+                reader_ids.append(bathy_id)
+
+            readers = [] # list of opendrift readers created from those copernicus products
+            for path in reader_ids: 
+                data = copernicusmarine.open_dataset(dataset_id = path,
+                                                   start_datetime = start_time, 
+                                                   end_datetime = start_time + duration) # this is the entire time range, including tseed
+                r = Reader(data)
+                readers.append(r)
+
+            print('adding readers...')
+            self.o.add_reader(readers)
+            
+            #print('adding ocean readers...')
+            #self.o.add_readers_from_list(uv_path, lazy=True) 
+            #print('adding wind readers...')
+            #self.o.add_readers_from_list(wind_path, lazy=True) # add reader from local file
+            
+            #if self.depth == True:
+             #   print('adding mixed layer readers...')
+              #  self.o.add_readers_from_list(mld_path, lazy=True) # add reader from local file
+              #  print('adding bathymetry readers...')
+               # bathy_reader = reader_netCDF_CF_generic.Reader(self.bathy_path)
+                #self.o.add_reader(bathy_reader)
 
             
             if context == 'bridge-bs':
@@ -888,7 +875,8 @@ class LagrangianDispersion(object):
                     _idx = ps.age_seconds.argmin('time', skipna=False) 
                     idx = _idx.where(_idx!=0).min() # time index of first nan value across all trajectories
                     ps = ps.isel(time=slice(None, int(idx)))
-                #print('time len after chopping tail of nans', len(ps.time))
+                    #print('idx', idx)
+                    #print('time len after chopping tail of nans', len(ps.time))
 
             # write useful attributes
             ps = ps.assign_attrs({'total_bounds': poly.total_bounds, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
@@ -903,7 +891,11 @@ class LagrangianDispersion(object):
 
             #print('time len just before writing temp file', len(ps.time))
 
-            ps.to_netcdf(str(q)) 
+            ps.to_netcdf(str(file_path))
+            print(f"done. NetCDF file '{self.particle_path}' created successfully.")
+
+        
+        self.particle_path = str(file_path)
 
         self.ds = ps
         
@@ -911,10 +903,8 @@ class LagrangianDispersion(object):
             Path(temp_outfile).unlink()
             os.rmdir(qtemp.name)
 
-        print(f"done. NetCDF file '{self.particle_path}' created successfully.")
+        
 
-        # Update the cache with the processed data
-        self.cache['cache_key'] = True
         
         pass
 
@@ -961,24 +951,6 @@ class LagrangianDispersion(object):
             decay_rate = self.decay_rate
         
         _ds = self.get_ds
-        ### copied this section to __init__, if particle_path is not None
-        # load opendrift dataset 
-        #if self.ds is None:
-         #   if type(self.particle_path) == dict: 
-          #      for i in self.particle_path:
-           #         path_list = self.particle_path
-           #         path_list[i] = str(path_list[i])
-
-            #    paths = path_list.values()
-            #else:
-             #   paths = str(self.particle_path)
-          
-            ### this is for reps ###
-            #_ds = xr.open_mfdataset(paths, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
-
-            #_ds['trajectory'] = np.arange(0, len(_ds.trajectory)) # give trajectories unique ID   
-            ### end of reps ###
-
                 
         status = {'active': 0, 'stranded': 1, 'seafloor': 2}
         
@@ -1277,7 +1249,7 @@ class LagrangianDispersion(object):
         plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 
         if save_fig is not None:
-            #Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True)
+            #Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True) # useful for geoplatform to keep them in same dir as raster
             plt.savefig(str(save_fig), dpi=160, bbox_inches='tight')
 
         return fig, ax
