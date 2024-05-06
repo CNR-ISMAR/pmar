@@ -10,6 +10,7 @@ from SALib.analyze import sobol
 from joblib import Parallel, delayed
 from copy import deepcopy
 import rioxarray as rxr
+import matplotlib.pyplot as plt
 
 class PMARCaseStudy(object):
     """
@@ -45,7 +46,7 @@ class PMARCaseStudy(object):
         Method running lpt simulation with selected parameters
 
     """
-    def __init__(self, context, ptot=1000, particle_status='all', poly_path=None, basedir='lpt_output', netrc_path=None, loglevel=40):
+    def __init__(self, context, ptot=1000, particle_status='all', poly_path=None, s_bounds = None, basedir='lpt_output', netrc_path=None, loglevel=40):
         """
         Parameters
         ----------   
@@ -76,6 +77,10 @@ class PMARCaseStudy(object):
         self.ptot = ptot
         self.reps = None # NUMBER OF REPS DEPENDS ON HOW MANY WE CAN FIT IN A YEAR WITH THAT TSHIFT
         self.loglevel = loglevel
+        self.hdiff = 10
+        self.decay_rate = 0
+        self.start_time_delay = 0
+        self.s_bounds = s_bounds
         pass
 
     def get_main_output(self):
@@ -102,7 +107,8 @@ class PMARCaseStudy(object):
         """
         self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir, netrc_path=self.netrc_path)        
         self.runtypelevel=runtypelevel
-        self.lpt.repeat_run(reps=int(np.round(365/self.tshift)), tshift=self.tshift, ptot=self.ptot, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate, loglevel=self.loglevel)
+        
+        self.lpt.repeat_run(reps=int(np.round(365/self.tshift)), start_time=(datetime(2019,1,1)+self.start_time_delay).strftime("%Y-%m-%d"), tshift=self.tshift, ptot=self.ptot, s_bounds=self.s_bounds, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate, loglevel=self.loglevel)
         pass
 
 
@@ -175,9 +181,14 @@ class CaseStudySUA(object):
     This is a base class for Sensitivity and Uncertainty Analysis.
     Child classes have to implement the "set_problem" and "set_params" methods.
     """
-    def __init__(self, module_cs, nparams=40, bygroup=True, calc_second_order=False,
+    def __init__(self, module_cs_params=None, nparams=40, bygroup=True, calc_second_order=False,
                  kwargs_run={}):
-        self.module_cs = module_cs
+        
+        #if module_cs_params is not None: 
+        self.module_cs_params = module_cs_params
+          #  module_cs = PMARCaseStudy(**self.module_cs_params)
+        #self.module_cs = module_cs
+
         self.kwargs_run = kwargs_run
         # check runtypelevel
         #if self.module_cs.runtypelevel is None or self.module_cs.runtypelevel < 3:
@@ -202,7 +213,8 @@ class CaseStudySUA(object):
         self.nparams = nparams
         self.bygroup = bygroup
         self.calc_second_order = calc_second_order
-
+        #self.module_cs_params = module_cs_params
+    
     def set_problem(self):
         """This is override by child classes"""
         pass
@@ -229,77 +241,7 @@ class CaseStudySUA(object):
         
     def sample(self, nruns, calc_second_order=False):
         return saltelli.sample(self.problem, nruns,
-                               calc_second_order=calc_second_order)
-
-    def runall(self, nruns, calc_second_order=False, njobs=1):
-        self.set_problem()
-        samples = self.sample(nruns, calc_second_order)
-        #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
-        model_output_stats = RunningStats2D(percentiles=None)
-        # TODO: add parallelization
-        
-        def _single_run(i, params):
-            module_cs = deepcopy(self.module_cs)
-            self.set_params(params, module_cs=module_cs)
-            module_cs.run(runtypelevel=0, **self.kwargs_run)
-            model_output = module_cs.get_main_output()
-            model_output_stats.push(model_output)
-            target_value = module_cs.get_SUA_target()
-            #target_value = 1
-            #logger.debug('run {} target={}'.format(i, target_value))
-            return target_value
-            
-        with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
-            target_values = parallel(delayed(_single_run)(i, params) for i, params in enumerate(samples))
-
-        # for i, params in enumerate(samples):
-        #     self.set_params(params)
-        #     self.module_cs.run(runtypelevel=0, **self.kwargs_run)
-        #     model_output = self.module_cs.get_main_output()
-        #     model_output_stats.push(model_output)
-        #     target_value = self.module_cs.get_SUA_target()
-        #     target_values.append(target_value)
-        #     logger.debug('run {} target={}'.format(i, target_value))
-        self.model_output_stats = model_output_stats
-        self.target_values = np.array(target_values)
-        
-    #def existingrun(self, path):
-        
-    def readall(self, path_to_output, njobs=1):
-        """ 
-        Read previously made outputs. Feeds model_output directly.
-        
-        Parameters
-        ----------
-        path_to_output : str
-            String containing the path to the output files to be analysed.
-        """
-        self.set_problem()
-        #samples = self.sample(nruns, calc_second_order)
-        #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
-        model_output_stats = RunningStats2D(percentiles=None)
-        
-        # TODO: add parallelization
-        
-        def _single_run(i, outputs):
-            module_cs = deepcopy(self.module_cs)
-            #self.set_params(params, module_cs=module_cs)
-            #module_cs.run(runtypelevel=0, **self.kwargs_run)
-            model_output = rxr.open_rasterio(outputs).isel(band=0).drop('band')
-            model_output_stats.push(model_output)
-            target_value = model_output.sum()
-            #logger.debug('run {} target={}'.format(i, target_value))
-            return target_value
-            
-        with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
-            target_values = parallel(delayed(_single_run)(i, outputs) for i, outputs in enumerate(path_to_output))
-                
-        #for i, outputs in enumerate(path_to_output):
-         #   target_values = _single_run(i, outputs)
-            
-        self.model_output_stats = model_output_stats
-        self.target_values = np.array(target_values)        
-                
+                               calc_second_order=calc_second_order)     
         
     
     def analyze(self, calc_second_order=False):
@@ -336,37 +278,44 @@ class PMARCaseStudySUA(CaseStudySUA):
     set_params()
         Method used to correctly feed the sampled values of each variables to the lpt run. 
     """
+    def __init__(self, module_cs_params=None, nparams=40, bygroup=True, calc_second_order=False,
+                 kwargs_run={}):
+        super().__init__(module_cs_params) # this calls the init from the parent class, and adds the following line
+        if module_cs_params is not None:
+            self.module_cs = PMARCaseStudy(**self.module_cs_params)
     
+        #self.decay_shift = 0.01 # because we are using logunif dist for the decay rate but we want values from 0 to 1
+        
     def set_problem(self):
         """
         Define the problem by giving a set of variables, their names, bounds and probability distributions. 
         
         """
         
-        nparams = self.nparams # ?
-        module_cs = self.module_cs # ? 
-        self.normalize_distance = None # ?
+        #nparams = self.nparams # ?
+        #module_cs = self.module_cs # ? 
+        #self.normalize_distance = None # ?
         
         # the problem is defined by a number of vairables, names of the variables, and their bounds.
         # D = 2 # number of variables
         
         self.add_problem_var(['time_var', 'duration', 'duration'], # length of the simulation in days # ['duration_days', 'duration', label], "label" is for tools4msp like ENV, USEPRE ecc
-                     [50, 90, 0.5], # bounds
-                     'triang', # distribution
+                     [36, 108], # bounds # tra 1 mese e 3 mesi (cioè una stagione)
+                     'unif', # distribution
                      #group_label if self.bygroup else None
                      )
 
         self.add_problem_var(['time_var', 'tstep', 'tstep'], # length of timestep in hours
-                     [4, 24], # bounds
+                     [2, 4], # bounds # 4 is the max at the 90th percentile of particle velocity for 4km resolution of raster
                      'unif', # distribution
                      #group_label if self.bygroup else None
                      )
         
-        self.add_problem_var(['hdiff', 'hdiff', 'hdiff'], # horizontal diffusivity
-                     [5, 15, 0.5], # bounds
-                     'triang', # distribution
+        #self.add_problem_var(['hdiff', 'hdiff', 'hdiff'], # horizontal diffusivity
+         #            [0, 15], # bounds # from baudena et al., streaming of plastic in the mediterranean sea
+          #           'unif', # distribution
                      #group_label if self.bygroup else None
-                     )
+                    # )
         
         #self.add_problem_var(['termvel', 'termvel', 'termvel'], # 
          #            [1e-3, 1e-2], # bounds
@@ -374,17 +323,23 @@ class PMARCaseStudySUA(CaseStudySUA):
            #          #group_label if self.bygroup else None
             #         )        
         
-        self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # decay rate
-                     [0.1, 1, 0.1], # bounds
-                     'triang', # distribution
+        #self.add_problem_var(['decay_rate', 'decay_rate', 'decay_rate'], # decay rate
+                    # [0+self.decay_shift, 1+self.decay_shift], # bounds
+                     #'logunif', # distribution
                      #group_label if self.bygroup else None
-                     )
+                    # )
         
         self.add_problem_var(['time_var', 'tshift', 'tshift'], # time shift between each rep
-                     [18, 90, 0.5], # bounds
-                     'triang', # distribution
+                     [15, 30], # bounds # 90 dà 4 stagioni diverse, 15 due volte al mese
+                     'unif', # distribution
                      #group_label if self.bygroup else None
-                     )        
+                     )    
+
+        self.add_problem_var(['time_var', 'start_time_delay', 'start_time_delay'], # start time of first rep of each run is 2019-01-01 + start_time_delay
+                     [0, 365], 
+                     'unif', # distribution
+                     #group_label if self.bygroup else None
+                     )    
     
     def set_params(self, params, module_cs=None):
         """
@@ -402,8 +357,86 @@ class PMARCaseStudySUA(CaseStudySUA):
         if module_cs is None:
             module_cs = self.module_cs
             
-        module_cs.duration = int(np.round(params[0])) # this needs to be parametrised
-        module_cs.tstep = timedelta(hours=int(np.round(params[1])))
-        module_cs.hdiff = params[2]
-        module_cs.decay_rate = params[3]
-        module_cs.tshift = params[4]
+        module_cs.duration = params[0]
+        module_cs.tstep = timedelta(hours=params[1])
+        module_cs.tshift = params[2]
+        module_cs.start_time_delay = timedelta(days=params[3])
+
+    def runall(self, nruns, calc_second_order=False, njobs=1):
+        self.set_problem()
+        samples = self.sample(nruns, calc_second_order)
+        #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
+        model_output_stats = RunningStats2D(percentiles=None) # initialise objects of class runningstats2d
+        print('model_output_stats #1', model_output_stats) # debugging 6/03/24
+        # TODO: add parallelization
+        
+        def _single_run(i, params):
+            print("########", i, params)
+            
+            module_cs = deepcopy(self.module_cs)
+            #module_cs = PMARCaseStudy(**self.module_cs_params)
+            #self.module_cs = module_cs
+            self.set_params(params, module_cs=module_cs)
+            module_cs.run(runtypelevel=0, **self.kwargs_run)
+            model_output = module_cs.get_main_output()
+            model_output_stats.push(model_output) # as input for method push (x) give model output, which in this case is r0
+            print('model_output_stats #2', model_output_stats) # debugging 6/03/24
+            target_value = module_cs.get_SUA_target()
+            print('target_value', target_value)
+            #target_value = 1
+            #logger.debug('run {} target={}'.format(i, target_value))
+            return target_value
+            
+        with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
+            target_values = parallel(delayed(_single_run)(i, params) for i, params in enumerate(samples))
+
+        # for i, params in enumerate(samples):
+        #     self.set_params(params)
+        #     self.module_cs.run(runtypelevel=0, **self.kwargs_run)
+        #     model_output = self.module_cs.get_main_output()
+        #     model_output_stats.push(model_output)
+        #     target_value = self.module_cs.get_SUA_target()
+        #     target_values.append(target_value)
+        #     logger.debug('run {} target={}'.format(i, target_value))
+        self.model_output_stats = model_output_stats
+        self.target_values = np.array(target_values)
+        print(self.model_output_stats, self.target_values)
+        
+
+    #### addition by sofbo
+    def readall(self, path_to_output, njobs=1):
+        """ 
+        Read previously made outputs. Feeds model_output directly.
+        
+        Parameters
+        ----------
+        path_to_output : str
+            String containing the path to the output files to be analysed.
+        """
+        self.set_problem()
+        #samples = self.sample(nruns, calc_second_order)
+        #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
+        model_output_stats = RunningStats2D(percentiles=None)
+        
+        # TODO: add parallelization
+        
+        def _single_run(i, outputs):
+            # module_cs = deepcopy(self.module_cs)
+            #module_cs = PMARCaseStudy(**self.module_cs_params) ### COMMENTING TO TEST, 08/01/24
+            #self.module_cs = module_cs ### COMMENTING TO TEST, 08/01/24
+            #self.set_params(params, module_cs=module_cs)
+            #module_cs.run(runtypelevel=0, **self.kwargs_run)
+            model_output = rxr.open_rasterio(outputs).isel(band=0).drop('band')
+            model_output_stats.push(model_output)
+            target_value = model_output.sum()
+            #logger.debug('run {} target={}'.format(i, target_value))
+            return target_value
+            
+        with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
+            target_values = parallel(delayed(_single_run)(i, outputs) for i, outputs in enumerate(path_to_output))
+                
+        #for i, outputs in enumerate(path_to_output):
+         #   target_values = _single_run(i, outputs)
+            
+        self.model_output_stats = model_output_stats
+        self.target_values = np.array(target_values)   
