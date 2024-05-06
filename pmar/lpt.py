@@ -37,15 +37,18 @@ from cachetools import LRUCache
 from netCDF4 import Dataset
 import hashlib
 import json
-import os
+from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
+#from dask.distributed import Client
 
 logger = logging.getLogger("LagrangianDispersion")
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
+
+#client = Client(n_workers=4, threads_per_worker=2)
 
 class PMARCache(object):
     def __init__(self, cachedir): # cachedir è una sottodirectory di basedir
@@ -71,8 +74,8 @@ class PMARCache(object):
         logger.error('particle cache = '+str(cache_key))
         return path_data_file, path_data_file.exists()
         
-    def raster_cache(self, res, poly_path, pnum, ptot, duration_days, start_time, reps, tshift, s_bounds, z, tstep, hdiff, termvel, crs, tinterp, r_bounds, use_path, decay_rate, aggregate, depth_layer, z_bounds, particle_status):
-        cache_key = {'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration_days': duration_days, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs, 'tinterp': tinterp, 'r_bounds': r_bounds, 'use_path': use_path, 'decay_rate': decay_rate, 'aggregate':aggregate, 'depth_layer': depth_layer, 'z_bounds': z_bounds, 'particle_status': particle_status}
+    def raster_cache(self, res, poly_path, pnum, ptot, duration_days, start_time, reps, tshift, s_bounds, z, tstep, hdiff, termvel, crs, tinterp, r_bounds, use_path, decay_rate, aggregate, depth_layer, z_bounds, particle_status, traj_dens):
+        cache_key = {'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration_days': duration_days, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs, 'tinterp': tinterp, 'r_bounds': r_bounds, 'use_path': use_path, 'decay_rate': decay_rate, 'aggregate':aggregate, 'depth_layer': depth_layer, 'z_bounds': z_bounds, 'particle_status': particle_status, 'traj_dens' : traj_dens}
         path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
         self.set_metadata('tif', **cache_key) #TODO spostare
         logger.error('raster cache = '+str(cache_key))
@@ -160,7 +163,6 @@ class LagrangianDispersion(object):
         self.origin_marker = 0
         self.netrc_path = netrc_path
         self.tstep = None
-        self.tseed = None
         self.pnum = None
         self.depth = depth
         self.termvel = 1e-3
@@ -174,6 +176,8 @@ class LagrangianDispersion(object):
         self.tshift = None
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
+        self._polygon_grid = None
+        self.res = None
         
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_rate'], 
@@ -210,38 +214,26 @@ class LagrangianDispersion(object):
                 pass
             
             
-        # if particle_path is given, retrieve attributes from filename and load ds
+        # if particle_path is given, retrieve number of reps and load ds
         if self.particle_path is not None: 
-            
-            avail_contexts = ['med', 'bs', 'bridge-bs', 'med-cmems', 'bs-cmems']
-            
-            for c in avail_contexts:
-                if c in self.particle_path:
-                    self.context = c
-            
-            ## extract info from filename (BAD)
-            if type(self.particle_path) == str:
-                ppath = self.particle_path 
-            else:
-                ppath = self.particle_path[0]
+
+            # gather number of reps from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
+            if type(self.particle_path) is not str: 
+                _reps = np.zeros(len(self.particle_path))
+                for idx, f in enumerate(self.particle_path):
+                    _reps[idx] = xr.open_dataset(f).origin_marker.maxval
                 
-            #self.depth = ppath.split('depth_')[1][0] == 'T'  # THIS IS BAD. does not work if particle_path is a list of files
-            
-            if ppath.find('tseed') != -1:
-                self.tseed = timedelta(seconds=float(ppath.split('tseed_')[1].split('s')[0]))
-            
-            #self.tstep = timedelta(seconds=float(ppath.split('tstep_')[1].split('s')[0]))
-            
-            #self.pnum = int(ppath.split('pnum_')[1].split('-')[0])
+                self.reps = int(np.max(_reps))+1
+                if len(_reps) != len(np.unique(_reps)):
+                    logger.warning(f'Repetition of origin_marker value detected. Please specify number of reps.')
+
             
             self.get_ds
             
             # if a particle_path is given, meaning a run with those configs already exists, the poly_path contained in the file's attributes "wins" over poly_path
             if self.ds.poly_path is not None:
-                self.poly_path = str(self.ds.poly_path)
-                
-        pass
-
+                self.poly_path = str(self.ds.poly_path)            
+    
     def get_userinfo(self, machine):
         try:
             secrets = netrc.netrc(self.netrc_path)
@@ -251,43 +243,44 @@ class LagrangianDispersion(object):
         if auth is None:
             return ''
         return f'{auth[0]}:{auth[2]}@'
-    
-    #### testing cachetools
-    #def _file_exists(self):
-     #   try:
-      #      with Dataset(self.particle_path, 'r'):
-       #         return True
-        #except FileNotFoundError:
-         #   return False   
-    
-    
-    ###### TODO: the filename used for the raster file is misleading with this method, if reps>1. ####### 
-    #def get_raster_paths(self, decay_rate, reps=None, tshift=None, use_label='even'): # 
-     #   if self.particle_path is None:
-      #      raise ValueError('particle file not found')
+
+    @property
+    def polygon_grid(self, force=False):
+        if self._polygon_grid is not None and not force:
+            return self._polygon_grid
+
+        res = self.res
+        crs = 'epsg:4326' # need to do this because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
+        poly = gpd.read_file(self.poly_path).to_crs(crs)
+        xmin, ymin, xmax, ymax = poly.total_bounds
         
-       # if type(self.particle_path) is str:
-        #    filename = self.particle_path.split('/')[-1].split('-marker')[0]
-            
-        #else:
-         #   filename = self.particle_path[0].split('/')[-1].split('-marker')[0]
+        cols = list(np.arange(xmin, xmax + res, res))               
+        rows = list(np.arange(ymin, ymax + res, res)) 
         
-        #raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}.tif'
-        
-        #if reps is not None:
-         #   raster_paths = f'{filename}-decay_rate_{decay_rate}-use_{use_label}-totreps_{reps}-tshift_{tshift}.tif'
-        
-        #return raster_paths
-    
+        polygons = [] 
+        for y in rows[:-1]:                
+            for x in cols[:-1]:    
+                polygons.append(Polygon([(x,y),
+                                         (x+res, y),
+                                         (x+res, y+res),
+                                         (x, y+res)]))
+                
+        grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
+        intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
+        self._polygon_grid = intersect
+        return intersect
+
     @property
     def get_ds(self):
-        partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
-        ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
-        logger.error(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
+        if type(self.particle_path) is str or len(self.particle_path) == 1:
+            ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
         
-        # if the run contained reps, ensure trajectories have unique IDs for convenience
-        logger.error(f'self.reps = {self.reps}')
-        if self.reps is not None:
+        else:
+            partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
+            ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
+            logger.error(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
+            # if the run contained reps, ensure trajectories have unique IDs for convenience
+            logger.error(f'self.reps = {self.reps}')
             ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
         
         self.ds = ds
@@ -296,14 +289,15 @@ class LagrangianDispersion(object):
     # Given multiple particle_paths, it returns the maximum time length. 
     # Used for preprocessing function in open_mfdataset to make sure all ds's have same time length, even if opendrift ended early because of all particles beaching.
     def find_correct_len(self):
-        lens = np.array([len(xr.open_dataset(filename).time) for filename in [self.particle_path]])
+        print([filename for filename in self.particle_path])
+        lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_path])
         return lens.max()
 
     def _preprocess(self, ds, correct_len):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
  
 
-    def repeat_run(self, reps, tshift, ptot, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):
+    def repeat_run(self, reps, tshift, ptot, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):
         """
         Optimization method to produce one single raster from multiple runs. 
         The runs all have the same configuration but are shifted in time by a time period (tshift). 
@@ -313,6 +307,7 @@ class LagrangianDispersion(object):
         self.tshift = tshift
         self.ptot = ptot
         particle_dict = {}
+        self.res = res
         
         for n in range(0, reps):
             print(f'----- STARTING REP #{n+1} -----')
@@ -338,25 +333,23 @@ class LagrangianDispersion(object):
             
         self.particle_path = list(particle_dict.values())
         self.origin_marker = np.arange(0,reps)
-        
-        #raster_exists = Path(self.get_raster_paths(decay_rate, reps, tshift, use_label)).exists()
-        #if raster_exists:
-         #   print('raster file with these configurations already exists')
-        
-        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, duration_days=duration_days, start_time=start_time, reps=reps, tshift=tshift, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
-        
+
+        #### CACHE ####
+        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, duration_days=duration_days, start_time=start_time, reps=reps, tshift=tshift, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        if raster_exists == True:
+            print('raster file with these configurations already exists')
         self.raster_path = raster_path
         
+        #### RASTERIZATION ####
         print('STARTING RASTER COMPUTATION')
-        # compute raster
         logger.error(f'raster_exists = {raster_exists}, raster_path = {raster_path}')
         if raster == True and not raster_exists:
             if type(use_path) == str:
-                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
+                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
                 #self.raster = r
             elif type(use_path) == list:
                 for idx, use in enumerate(use_path):
-                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, save_r=False)
+                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens, save_r=False)
                     if idx == 0:
                         self.raster = r
                     else:
@@ -382,7 +375,7 @@ class LagrangianDispersion(object):
         
         
         
-    def run(self, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='surface', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all'):         
+    def run(self, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='surface', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -449,7 +442,7 @@ class LagrangianDispersion(object):
         
         # raise error if particle_path is already given -> DEPRECATED. IF PARTICLE_PATH IS NOT GIVEN, MAKE PARTICLE_SIMULATION. OTHERWISE GO STRAIGHT TO RASTER. 
         context = self.context 
-        
+        self.res = res
         reps = None 
         tshift = None
         
@@ -485,17 +478,17 @@ class LagrangianDispersion(object):
         self.outputdir = outputdir
         ###############################
         
-        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, duration_days=duration_days, start_time=start_time, reps=None, tshift=None, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
+        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, duration_days=duration_days, start_time=start_time, reps=None, tshift=None, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         print('STARTING RASTER COMPUTATION')
         # compute raster
         if raster == True and not raster_exists:
             if type(use_path) == str:
-                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status)
+                r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
                 #self.raster = r
             elif type(use_path) == list:
                 for idx, use in enumerate(use_path):
-                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, save_r=False)
+                    r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens, save_r=False)
                     if idx == 0:
                         self.raster = r
                     else:
@@ -650,13 +643,15 @@ class LagrangianDispersion(object):
         end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
         time_step = tstep
 
-        if self.tseed is None:
-            self.tseed = timedelta(days=(duration_days * 20 / 100)) #tseed is 20% of total duration
+        #### REMOVING TSEED #### APRIL 2024
+        #if self.tseed is None:
+         #   self.tseed = timedelta(days=(duration_days * 20 / 100)) #tseed is 20% of total duration
             
-        tseed = self.tseed
-
+        #tseed = self.tseed
         # tseed gets added to the total duration, then removed and everything is realigned. 
-        duration = timedelta(days=duration_days)+tseed-timedelta(days=1) # true duration of the run. the tseed time period is then deleted.
+        #duration = timedelta(days=duration_days)+tseed-timedelta(days=1) # true duration of the run. the tseed time period is then deleted.
+
+        duration = timedelta(days=duration_days)
         
         self.tstep = tstep
         
@@ -739,6 +734,7 @@ class LagrangianDispersion(object):
             
             elif context == 'med-cmems': # copernicus Med Sea data (remote connection)
                 ocean_id = "med-cmcc-cur-rean-h"
+                #wind_id = "cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H"
                 wind_id = "cmems_obs-wind_glo_phy_my_l4_P1M" # this is a global reanalysis product, so same in all contexts
                 mld_id = 'med-cmcc-mld-rean-d'
                 bathy_id = 'cmems_mod_glo_phy_my_0.083deg_static' # this is a global reanalysis product, so same in all contexts
@@ -756,7 +752,7 @@ class LagrangianDispersion(object):
             for path in reader_ids: 
                 data = copernicusmarine.open_dataset(dataset_id = path,
                                                    start_datetime = start_time, 
-                                                   end_datetime = start_time + duration) # this is the entire time range, including tseed
+                                                   end_datetime = start_time + duration) # this is the entire time range, including tseed (tseed now deprecated)
                 r = Reader(data)
                 readers.append(r)
 
@@ -770,7 +766,7 @@ class LagrangianDispersion(object):
             
                 
             # some OpenDrift configurations
-            self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'stranding' means beaching of particles is allowed
             self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
             self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
             
@@ -785,7 +781,7 @@ class LagrangianDispersion(object):
             # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
             if self.depth == True:
                 self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time+self.tseed], 
+                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed], 
                                            terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=1e4)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
@@ -793,7 +789,7 @@ class LagrangianDispersion(object):
             
             # if simulation is 2D, simply seed particles over polygon
             else:
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time+self.tseed],
+                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
                                            origin_marker=self.origin_marker, radius=1e4)
             
             # run simulation and write to temporary file
@@ -807,7 +803,7 @@ class LagrangianDispersion(object):
 
             self.o.run(duration=duration, #end_time=end_time, 
                        time_step=time_step, #time_step_output=timedelta(hours=24), 
-                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness'])# file was getting too big, 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker'])#, 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness',])# 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
             elapsed = (T.time() - t_0)
             print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -827,28 +823,31 @@ class LagrangianDispersion(object):
             ps = _ps.where(_ps.status>=0).ffill('time') 
             #print('time len after ffill inactive', len(ps.time))
 
+
+            #### NOT NEEDED ANYMORE SINCE WE ARE REMOVING TSEED ####
             # align trajectories by particles' age
-            shift_by = -ps.age_seconds.argmin('time') 
-            if self.tseed.days!=0: 
+            #shift_by = -ps.age_seconds.argmin('time') 
+            #if self.tseed.days!=0: 
 
-                def shift_by_age(da, shift_by):
-                    newda = xr.apply_ufunc(np.roll, da, shift_by, input_core_dims=[['time'], []], output_core_dims=[['time']], vectorize=True, dask='parallelized', keep_attrs='drop_conflicts')
-                    return newda
+             #   def shift_by_age(da, shift_by):
+              #      newda = xr.apply_ufunc(np.roll, da, shift_by, input_core_dims=[['time'], []], output_core_dims=[['time']], vectorize=True, dask='parallelized', keep_attrs='drop_conflicts')
+               #     return newda
 
-                ps=ps.apply(shift_by_age, shift_by=shift_by) 
+                #ps=ps.apply(shift_by_age, shift_by=shift_by) 
                 #print('time len after shift by age', len(ps.time))
 
                 # remove tail of nan values
-                if np.any(np.isnan(ps.age_seconds)): # if there are any nan values in age_seconds
-                    _idx = ps.age_seconds.argmin('time', skipna=False) 
-                    idx = _idx.where(_idx!=0).min() # time index of first nan value across all trajectories
-                    ps = ps.isel(time=slice(None, int(idx)))
+                #if np.any(np.isnan(ps.age_seconds)): # if there are any nan values in age_seconds
+                 #   _idx = ps.age_seconds.argmin('time', skipna=False) 
+                  #  idx = _idx.where(_idx!=0).min() # time index of first nan value across all trajectories
+                   # ps = ps.isel(time=slice(None, int(idx)))
                     #print('idx', idx)
                     #print('time len after chopping tail of nans', len(ps.time))
 
             # write useful attributes
             ps = ps.assign_attrs({'total_bounds': poly.total_bounds, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
-                                  'tseed': self.tseed.total_seconds(), 'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth),
+                                  #'tseed': self.tseed.total_seconds(), 
+                                  'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth),
                                   'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
                                     #removing this attribute as i already have the check for discarded readers elsewhere. 
                                     #This way I can compare attributes more easily for new caching method
@@ -876,8 +875,7 @@ class LagrangianDispersion(object):
         
         pass
 
-    
-    def particle_raster(self, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', save_r=True):
+    def particle_raster(self, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -914,148 +912,235 @@ class LagrangianDispersion(object):
         """
     
         t_0 = T.time()
-         
-        if decay_rate is None:
-            decay_rate = self.decay_rate
-        
-        _ds = self.get_ds
-                
-        status = {'active': 0, 'stranded': 1, 'seafloor': 2}
-        
-        if particle_status in status.keys():
-            traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
-            ds = _ds.sel(trajectory=traj)
-        else: 
-            ds = _ds
-    
-        ### TIME INTERPOLATION ###
-        if tinterp is not None:
-            new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
-            ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
-            ds['tinterp'] = tinterp
-        else:
-            pass
-            
 
-        ### BINS ### 
-        
-        # this polygon is only used to extract bounds for construction of bins 
-        if r_bounds is not None: # if r_bounds are given, meaning we are not using the full basin, create polygon to use for aggregation / visualisation
-            poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False)
-        else:    # if no r_bounds are given, use seeding polygon
-            if self.poly_path is not None:
-                poly = gpd.read_file(self.poly_path).to_crs('epsg:4326').buffer(distance=.2) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
-                r_bounds = poly.total_bounds
-            elif self.poly_path is None: 
-                raise ValueError("No spatial domain found to perform aggregation. Please provide 'r_bounds' manually.")
-                
-        #### WEIGHT ####   
-        # default weight is 1
-        ds = ds.assign({'weight': (('trajectory', 'time'), np.ones((ds.lon.shape)))})
-
-        # if no use path is given, compute bins from resolution and bounds of polygon
-        if use_path == 'even':
-            xbin = np.arange(r_bounds[0],r_bounds[2]+res/1e5,res/1e5) # factor 1e5 is to approximately convert m to latlon deg
-            ybin = np.arange(r_bounds[1],r_bounds[3]+res/1e5,res/1e5)
-            
-        # otherwise, use same grid as the given raster  (use_path)
-        else: 
-            _use = rxr.open_rasterio(use_path).sortby('x').sortby('y').isel(band=0).drop('band')
-            spatial_ref = _use.spatial_ref.crs_wkt
-            bds_reproj = poly.to_crs(spatial_ref).total_bounds 
-            #create `weight` variable from value of `use` at starting positions of particles
-            
-            use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').fillna(0)
-            xbin = np.append(use.x - np.diff(use.x).mean()/2, use.x[-1]+np.diff(use.x).mean()/2)
-            ybin = np.append(use.y - np.diff(use.y).mean()/2, use.y[-1]+np.diff(use.y).mean()/2) 
-            
-            use_weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat, method='nearest')/len(self.ds.time) # matching timestep of simulation
-            
-            ds['weight'] = ds.weight*use_weight
-
-        #### CONTINUOUS RELEASE ####
-        # we are simulating continuous release by giving particles weight = (total_timestpes - timestep_index).
-        # this way, it is as if at each timestep a new particle were released from the same starting position. 
-        # this relies on the assumption that a particle released from the same location would follow the same trajectory.
-        # the result is more particles closer to the use (which is the source). 
-        cont_release = (np.arange(-len(ds.time),0)*-1)
-        ds['weight'] = ds.weight*cont_release
-        
-        
-        ### DECAY RATE ####
-        k = decay_rate #decay coefficient given by user
-        y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function
-        ds['decay'] = y  
-        ds['weight'] = ds.weight*ds.decay
-
-        ### BEACHED PARTICLES ###
-        # for each trajectory, select all timesteps where particle is still active (status=0), propagate its weight forward by one timestep, refill the nans with 0. 
-        # this way, we are able to visualise the beached particles but their weight doesn't add up for each timestep that they are in that same position.        
-        ds['weight'] = ds.weight.where(ds.status==0).load().ffill('time', limit=1).fillna(0) 
-        
-        #### HISTOGRAMS. 2 CASES: 2D or 3D ####
-        if self.depth is None:
-            if len(np.unique(ds.z)) > 2:
-                self.depth = True
-            else:
-                self.depth = False
-        else:
-            pass
-        
-        # FILTER OUT PARTICLES WHERE WEIGHT IS 0 AT START TIME TO FREE UP MEMORY.
-        # NB: filter out entire TRAJECTORIES of particles which are released in cells where use layer is 0. this is done by extracting their particle ID. 
-        p_id = ds.isel(time=0).where(ds.weight.isel(time=0)!=0).trajectory.data
-        ds = ds.sel(trajectory=p_id).dropna('trajectory', 'all')
-        
-        # 3D
-        if self.depth == True:
-            ds = ds.assign(depth=-ds.z)
-            # condition to filter out ds based on depth_layer
-            cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
-            
-            if depth_layer in cond.keys():
-                ds = ds.where(cond[depth_layer])
-                
-        elif self.depth == False:
-            pass
-        else:
-            raise ValueError('cannot detect whether 2D or 3D')
-        
-        self.ds = ds
-        
-        #### AGGREGATION METHOD ####
         qtemp = tempfile.TemporaryDirectory("raster", dir=self.basedir)
         
-        #if self.reps is not None: 
-         #   reps = self.reps
-        #else:
-         #   reps = 1
+        if decay_rate is None:
+            decay_rate = self.decay_rate
+
+        #### TURNING particle_path INTO A LIST FOR EASIER ITERATION OVER REPS. ###
+        if type(self.particle_path) == str:
+            particle_path = [self.particle_path]
+        else:
+            particle_path = self.particle_path
         
-        for i in range(0,self.reps):
-            d = ds.where(ds.origin_marker==i).dropna('trajectory', 'all')
-            hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory'], weights=d.weight, block_size=len(d.trajectory)).chunk({'lon_bin':10, 'lat_bin': 10}).sum('time') 
-            hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc') 
-            print(f'Raster done for rep {i}')
-            del hh, d  
-                            
+        for idx, path in enumerate(particle_path):
+            _ds = xr.open_dataset(path, chunks={'trajectory': 1000, 'time':20})
+
+            #print(_ds)
+            print(f'path = {path}, origin_marker = {_ds.origin_marker.maxval}')
+            
+    
+            #### FILTER PARTICLES BY STATUS ####
+            status = {'active': 0, 'stranded': 1, 'seafloor': 2}
+            if particle_status in status.keys():
+                traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
+                ds = _ds.sel(trajectory=traj)
+            else: 
+                ds = _ds
+        
+            ### TIME INTERPOLATION ###
+            if tinterp is not None:
+                new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
+                ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
+                ds['tinterp'] = tinterp
+                
+    
+            ### BINS ### 
+            # TODO: parametrize buffer
+            # this polygon is only used to extract bounds for construction of bins 
+            if r_bounds is not None: # if r_bounds are given, meaning we are not using the full basin, create polygon to use for aggregation / visualisation
+                poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326').buffer(distance=res*3)
+            else:    # if no r_bounds are given, use seeding polygon
+                if self.poly_path is not None:
+                    poly = gpd.read_file(self.poly_path).to_crs('epsg:4326').buffer(distance=res*3) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
+                    r_bounds = poly.total_bounds
+                elif self.poly_path is None: 
+                    raise ValueError("No spatial domain found to perform aggregation. Please provide 'r_bounds' manually.")
+            
+            #### WEIGHT ####   
+            # default weight is 1
+            print('weight = 1')
+            ds = ds.assign({'weight': (('trajectory', 'time'), np.ones((ds.lon.shape)))})
+            # we divided it by the number of tsteps, so that the final time integral is conserved (sorgente continua)
+            ds['weight'] = ds.weight/len(ds.time)
+            print(f'weight after time division {ds.weight.sum().load()}')
+            # if no use path is given, compute bins from resolution and bounds of polygon
+            print('calculating bins')
+    
+            #if use_path == 'even':
+             #   xbin = np.arange(r_bounds[0]-res/1e5,r_bounds[2]+res/1e5,res/1e5) # factor 1e5 is to approximately convert m to latlon deg
+              #  ybin = np.arange(r_bounds[1]-res/1e5,r_bounds[3]+res/1e5,res/1e5)
+                
+            # otherwise, use same grid as the given raster  (use_path)
+            #else: 
+             #   _use = rxr.open_rasterio(use_path).sortby('x').sortby('y').isel(band=0).drop('band')
+              #  spatial_ref = _use.spatial_ref.crs_wkt
+               # bds_reproj = poly.to_crs(spatial_ref).total_bounds 
+                #create `weight` variable from value of `use` at starting positions of particles
+                
+                #use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').fillna(0)
+                #xbin = np.append(use.x - np.diff(use.x).mean()/2, use.x[-1]+np.diff(use.x).mean()/2)
+                #ybin = np.append(use.y - np.diff(use.y).mean()/2, use.y[-1]+np.diff(use.y).mean()/2) 
+    
+            print('calculating bin_n at time 0')
+            grid = self.polygon_grid
+            _bins = np.zeros((grid.shape))
+            print(_bins.shape)
+            _bins[:,0] = np.array(grid.centroid.x) 
+            _bins[:,1] = np.array(grid.centroid.y)  
+
+            func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
+            print('bin_n ufunc')
+            ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=0).lon, ds.isel(time=0).lat, vectorize=True, dask='parallelized')
+     
+            # once we have the bin_n of each particle at t0, we can count how many particles were in each bin and divide the weight by that number.
+            print('bin_n groupby')
+            _w = ds.isel(time=0).weight.groupby(ds.isel(time=0).bin_n_t0)/ds.isel(time=0).bin_n_t0.groupby(ds.isel(time=0).bin_n_t0).count()
+            print(f'################ {ds.isel(time=0).weight.groupby(ds.isel(time=0).bin_n_t0)}')
+            print('assigning weight to ds')
+            ds = ds.assign({'weight':(('trajectory', 'time'), _w.broadcast_like(ds.weight).data)})
+            print(f'weight after groupby bin {ds.weight.sum().load()}')
+
+            
+            #### AVOID DOUBLE-COUNTING IF THE SAME PARTICLE STAYS IN THE SAME CELL ####
+            # find the bin number. 
+            # make a temporary histogram at time 0 (as that is the time where particles are evenly distributed), stack it and drop bins where there are no particles.
+            # this is so that we only consider bins within our bounding box where there are particles (e.g. excluding land ones).
+            if traj_dens == True:
+                print('calculating bin numbers...')
+                def find_bin_n(a, b):
+                    # this allows us to exclude bins with no particles 
+                    hs = histogram(ds.isel(time=0).lon, ds.isel(time=0).lat, bins=[xbin, ybin]).transpose().stack(bin = ('lat_bin', 'lon_bin'))
+                    
+                    _bins = np.zeros((len(hs.where(hs>0).dropna('bin').lon_bin.data), 2)) # we are only taking bins where there are particles
+                    _bins[:,0] = hs.where(hs>0).dropna('bin').lon_bin.data
+                    _bins[:,1] = hs.where(hs>0).dropna('bin').lat_bin.data
+                    
+                    func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
+                    return xr.apply_ufunc(func, a, b, vectorize=True, dask='parallelized'), len(_bins)
+                
+                # assign this new variable, bin number, to the ds
+                bin_n, total_bins = find_bin_n(ds.lon, ds.lat)
+                ds = ds.assign({'bin_n': bin_n})
+        
+                print('fixing double counts...')
+                # once the bin number is found, we can use that to avoid double counting of particles:
+                dss = ds.stack(s=('trajectory', 'time')) # stack trajectory and time into one dimension
+                _w = ds.weight.copy() # extract weight and add bin_n as a coordinate in this new dataarray
+                _w['bin_n'] = ds.bin_n
+                _trajectory = ds.trajectory.data # trajectory and bin_n here are needed for expected group in xarray_reduce, a compulsory parameter to use dask with flox
+                _bin_n = np.arange(0,total_bins)
+                # xarray_reduce basically performs a groupby on the weight by trajectory and then bin_n, then aggregates with function "count"
+                print('groupby...')
+                w = xarray_reduce(_w, 'trajectory', 'bin_n', func='count', method='blockwise', expected_groups=(_trajectory, _bin_n)) # blockwise and expected groups are needed for dask
+                w = w.stack(s=('trajectory', 'bin_n')) # stack trajectory and bin into one dimension
+                # create a multiindex variable to index weight with
+                print('creating multiindex...')
+                t_0 = T.time()
+                arrays = [dss.trajectory.data, dss.bin_n.load().data] 
+                i = pd.MultiIndex.from_arrays(arrays, names=('trajectory', 'bin_n'))
+                # weight with no double counting is equal to the original weight (at this point, still 1), divided by the number of times the particle remained in that cell
+                elapsed = (T.time() - t_0)
+                print("--- multiindex calculated in %s minutes ---" % timedelta(minutes=elapsed))
+                print('calculating new weight...')
+                dss['weight'].data = dss.weight.data/w.sel(s=i).data
+                ds['weight'] = dss.weight.unstack()
+            #else:
+                ### BEACHED PARTICLES ###
+                ### maybe not needed anymore since i am doing the avoid double counting thing ###
+                # for each trajectory, select all timesteps where particle is still active (status=0), propagate its weight forward by one timestep, refill the nans with 0. 
+                # this way, we are able to visualise the beached particles but their weight doesn't add up for each timestep that they are in that same position.        
+                #ds['weight'] = ds.weight.where(ds.status==0).load().ffill('time', limit=1).fillna(0) 
+    
+            # apply use weight 
+            if use_path != 'even':
+                print('applying use weight...')
+                poly_bounds = poly.total_bounds 
+                use = rxr.open_rasterio(use_path, chunks={'x':500, 'y':500}).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3]))
+                use_weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat,  method='nearest', tolerance=res/2)
+                ds['weight'] = ds.weight*use_weight
+                print(f'weight after use weight {ds.weight.sum().load()}')
+
+            
+            # FILTER OUT PARTICLES WHERE WEIGHT IS 0 AT START TIME TO FREE UP MEMORY.
+            # NB: filter out entire TRAJECTORIES of particles which are released in cells where use layer is 0. this is done by extracting their particle ID. 
+            # this actually takes a long time to calculate...
+                print('removing particles where weight was 0')
+                p_id = ds.isel(time=0).where(ds.weight.isel(time=0)!=0).dropna('trajectory').trajectory.data
+                ds = ds.sel(trajectory=p_id)
+            
+            #### CONTINUOUS RELEASE ####
+            # we are simulating continuous release by giving particles weight = (total_timestpes - timestep_index).
+            # this way, it is as if at each timestep a new particle were released from the same starting position. 
+            # this relies on the assumption that a particle released from the same location would follow the same trajectory.
+            # the result is more particles closer to the use (which is the source). 
+            #cont_release = (np.arange(-len(ds.time),0)*-1)
+            #ds['weight'] = ds.weight*cont_release
+            
+            print('applying decay rate...')
+            ### DECAY RATE ####
+            k = decay_rate #decay coefficient given by user
+            y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function
+            ds['decay'] = y  
+            ds['weight'] = ds.weight*ds.decay
+            print(f'weight after decay rate {ds.weight.sum().load()}')
+
+    
+            
+            #### HISTOGRAMS. 2 CASES: 2D or 3D ####
+            if self.depth is None:
+                if len(np.unique(ds.z)) > 2:
+                    self.depth = True
+                else:
+                    self.depth = False
+            else:
+                pass
+            
+            # 3D
+            if self.depth == True:
+                ds = ds.assign(depth=-ds.z)
+                # condition to filter out ds based on depth_layer
+                cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
+                
+                if depth_layer in cond.keys():
+                    ds = ds.where(cond[depth_layer])
+                    
+            elif self.depth == False:
+                pass
+            else:
+                raise ValueError('cannot detect whether 2D or 3D')
+                        
+            print('calculating histograms...')
+            print(f'computing h for rep {idx}')
+            xbin = np.sort(np.unique(grid.boundary.get_coordinates().x))
+            ybin = np.sort(np.unique(grid.boundary.get_coordinates().y))
+            hh = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=ds.weight, block_size='auto')#.sum('time') #.chunk({'lon_bin':10, 'lat_bin': 10})
+            #print('starting load')
+            #hh.load()
+            #print('loaded')
+            print('writing temporary netcdf...')
+            hh.to_netcdf(f'{qtemp.name}/temphist_{idx}.nc') 
+            print(f'Raster done for rep {idx}')
+                
+        #### AGGREGATION METHOD ####
+        print('aggregating reps...')
         if aggregate == 'mean':    
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
+        elif aggregate == 'sum': 
+            print('############################# doing the sum!')
+            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').sum('slices').histogram_lon_lat
         elif aggregate == 'max': 
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
         elif aggregate.startswith('p'):
             quantile = eval(aggregate.split('p')[-1])/100
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').load().quantile(quantile, dim='slices').histogram_lon_lat # does not work unless I .load()
         else:
-            raise ValueError("'aggregate' must be one of 'mean', 'max' or 'p95'.")        
+            raise ValueError("'aggregate' must be one of 'mean', 'sum', 'max' or 'p95'.")        
         
         h = _h.transpose()   
-        
-        # dividere h per il numero medio di particelle per cella, in modo da distribuire l'uso (che è dato per cella) tra tutte le particelle presenti in quella cella
-        # il numero di particelle medio per cella è il numero totale di particelle (che con la sorgente continua è n_traiettorie * n_timesteps) diviso per il numero di celle. 
-        ptot = len(ds.trajectory)*len(ds.time)
-        tot_cells = int(h.count().load()) # number of not nan cells. excludes land cells and cells where no particles ever landed. assuming we are seeding enough particles, this would cover exactly our domain in the sea. 
-        h = h/ptot*tot_cells
-        
+
+        print('creating tiff...')
         # write geo information to xarray and save as geotiff
         r = (
             xr.DataArray(h) # need to transpose it because xhistogram does that for some reason
@@ -1064,7 +1149,7 @@ class LagrangianDispersion(object):
             .rio.write_coordinate_system())
         
         r=r.assign_attrs({'use_path': use_path, 'use_label': use_label}).to_dataset().rename({'histogram_lon_lat': 'r0'})
-        
+
         ####### Landmask ######
         if 'bs' in self.context:
             shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
@@ -1083,21 +1168,17 @@ class LagrangianDispersion(object):
         else:
             mask = _mask.buffer(distance=0.1) # if including beached particles, consider a buffer around ocean 
             
-        # remove temporary files and folder
-        for p in Path(qtemp.name).glob("temphist*.nc"):
-            p.unlink()
-        
-        # rm qtemp        
-        os.rmdir(qtemp.name)
-        
         elapsed = (T.time() - t_0)
         print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
         
         if save_r == True:
             self.raster = r
 
-        logger.error(f'lon = {r.lon_bin}, lat = {r.lat_bin}')
+        self.ds = ds
+        #self.get_ds
+        
         return r
+
     
     def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig='thumbnail'):
         """
