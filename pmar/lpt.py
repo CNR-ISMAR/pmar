@@ -249,8 +249,8 @@ class LagrangianDispersion(object):
         if self._polygon_grid is not None and not force:
             return self._polygon_grid
 
-        res = self.res
-        crs = 'epsg:4326' # need to do this because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
+        res = self.res 
+        crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
         poly = gpd.read_file(self.poly_path).to_crs(crs)
         xmin, ymin, xmax, ymax = poly.total_bounds
         
@@ -297,7 +297,7 @@ class LagrangianDispersion(object):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
  
 
-    def repeat_run(self, reps, tshift, ptot, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):
+    def repeat_run(self, reps, tshift, ptot, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):
         """
         Optimization method to produce one single raster from multiple runs. 
         The runs all have the same configuration but are shifted in time by a time period (tshift). 
@@ -307,7 +307,15 @@ class LagrangianDispersion(object):
         self.tshift = tshift
         self.ptot = ptot
         particle_dict = {}
+
         self.res = res
+
+        ##### CACHE ##### 
+        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, duration_days=duration_days, start_time=start_time, reps=reps, tshift=tshift, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        
+        if raster_exists == True:
+            print('raster file with these configurations already exists')
+        self.raster_path = raster_path
         
         for n in range(0, reps):
             print(f'----- STARTING REP #{n+1} -----')
@@ -335,12 +343,8 @@ class LagrangianDispersion(object):
         self.origin_marker = np.arange(0,reps)
 
         #### CACHE ####
-        raster_path, raster_exists = self.cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, duration_days=duration_days, start_time=start_time, reps=reps, tshift=tshift, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, decay_rate=decay_rate, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        if raster_exists == True:
-            print('raster file with these configurations already exists')
-        self.raster_path = raster_path
+        # moving this above, before particle_simulation, so that it checks for raster exists first
         
-        #### RASTERIZATION ####
         print('STARTING RASTER COMPUTATION')
         logger.error(f'raster_exists = {raster_exists}, raster_path = {raster_path}')
         if raster == True and not raster_exists:
@@ -375,7 +379,7 @@ class LagrangianDispersion(object):
         
         
         
-    def run(self, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='surface', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):         
+    def run(self, pnum=100, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, raster=True, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='surface', z_bounds=[10,100], loglevel=40, save_to=None, plot=True, particle_status='all', traj_dens = False):         
         """
         Launches methods particle_simulation and particle_raster. 
         
@@ -482,6 +486,7 @@ class LagrangianDispersion(object):
         
         print('STARTING RASTER COMPUTATION')
         # compute raster
+        #res = res*1e-5 ### conversion to lat, lon TO BE FIXED
         if raster == True and not raster_exists:
             if type(use_path) == str:
                 r = self.particle_raster(res=res, crs=crs, tinterp=tinterp, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_rate=decay_rate,  aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
@@ -749,10 +754,11 @@ class LagrangianDispersion(object):
                 reader_ids.append(bathy_id)
 
             readers = [] # list of opendrift readers created from those copernicus products
+            end_datetime = datetime.strptime((end_time + timedelta(days=1)).date().strftime('%Y-%m-%d'), '%Y-%m-%d') # rounding up to the next day, so it works even when duration is given as a float (such as in SUA)
             for path in reader_ids: 
                 data = copernicusmarine.open_dataset(dataset_id = path,
                                                    start_datetime = start_time, 
-                                                   end_datetime = start_time + duration) # this is the entire time range, including tseed (tseed now deprecated)
+                                                   end_datetime = end_datetime) 
                 r = Reader(data)
                 readers.append(r)
 
@@ -782,7 +788,7 @@ class LagrangianDispersion(object):
             if self.depth == True:
                 self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
                 self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed], 
-                                           terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=1e4)
+                                           terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=2e3)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
                 self.o.set_config('drift:vertical_mixing', True)
@@ -790,7 +796,7 @@ class LagrangianDispersion(object):
             # if simulation is 2D, simply seed particles over polygon
             else:
                 self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
-                                           origin_marker=self.origin_marker, radius=1e4)
+                                           origin_marker=self.origin_marker, radius=2e3)
             
             # run simulation and write to temporary file
             #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
@@ -875,7 +881,7 @@ class LagrangianDispersion(object):
         
         pass
 
-    def particle_raster(self, res=4000, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
+    def particle_raster(self, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -886,7 +892,7 @@ class LagrangianDispersion(object):
         Parameters
         ----------
         res : float, optional
-            Spatial resolution for raster in [m]. Default is 3km
+            Spatial resolution for raster in [m]. Default is 4km
         crs : str, optional
             EPSG string for raster. Default is 4326
         tinterp : float, optional
@@ -914,6 +920,9 @@ class LagrangianDispersion(object):
         t_0 = T.time()
 
         qtemp = tempfile.TemporaryDirectory("raster", dir=self.basedir)
+
+        #res = res*1e-5 ### conversion to lat, lon TO BE FIXED
+
         
         if decay_rate is None:
             decay_rate = self.decay_rate
@@ -953,7 +962,7 @@ class LagrangianDispersion(object):
                 poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326').buffer(distance=res*3)
             else:    # if no r_bounds are given, use seeding polygon
                 if self.poly_path is not None:
-                    poly = gpd.read_file(self.poly_path).to_crs('epsg:4326').buffer(distance=res*3) # buffer is added because of radius=1e4 when seeding. if this is not done, some particles may be cut out even in their starting position
+                    poly = gpd.read_file(self.poly_path).to_crs('epsg:4326').buffer(distance=res*3) # buffer is added because of radius=2e3 when seeding. if this is not done, some particles may be cut out even in their starting position
                     r_bounds = poly.total_bounds
                 elif self.poly_path is None: 
                     raise ValueError("No spatial domain found to perform aggregation. Please provide 'r_bounds' manually.")
@@ -965,31 +974,14 @@ class LagrangianDispersion(object):
             # we divided it by the number of tsteps, so that the final time integral is conserved (sorgente continua)
             ds['weight'] = ds.weight/len(ds.time)
             print(f'weight after time division {ds.weight.sum().load()}')
-            # if no use path is given, compute bins from resolution and bounds of polygon
-            print('calculating bins')
-    
-            #if use_path == 'even':
-             #   xbin = np.arange(r_bounds[0]-res/1e5,r_bounds[2]+res/1e5,res/1e5) # factor 1e5 is to approximately convert m to latlon deg
-              #  ybin = np.arange(r_bounds[1]-res/1e5,r_bounds[3]+res/1e5,res/1e5)
-                
-            # otherwise, use same grid as the given raster  (use_path)
-            #else: 
-             #   _use = rxr.open_rasterio(use_path).sortby('x').sortby('y').isel(band=0).drop('band')
-              #  spatial_ref = _use.spatial_ref.crs_wkt
-               # bds_reproj = poly.to_crs(spatial_ref).total_bounds 
-                #create `weight` variable from value of `use` at starting positions of particles
-                
-                #use = _use.sel(x=slice(bds_reproj[0], bds_reproj[2]), y=slice(bds_reproj[1], bds_reproj[3])).rio.reproject(spatial_ref, resolution=res, nodata=0).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').fillna(0)
-                #xbin = np.append(use.x - np.diff(use.x).mean()/2, use.x[-1]+np.diff(use.x).mean()/2)
-                #ybin = np.append(use.y - np.diff(use.y).mean()/2, use.y[-1]+np.diff(use.y).mean()/2) 
-    
-            print('calculating bin_n at time 0')
+            
+            print('calculating grid')
             grid = self.polygon_grid
             _bins = np.zeros((grid.shape))
             print(_bins.shape)
             _bins[:,0] = np.array(grid.centroid.x) 
             _bins[:,1] = np.array(grid.centroid.y)  
-
+            print('calculating bin number at time 0')
             func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
             print('bin_n ufunc')
             ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=0).lon, ds.isel(time=0).lat, vectorize=True, dask='parallelized')
@@ -1057,7 +1049,7 @@ class LagrangianDispersion(object):
             if use_path != 'even':
                 print('applying use weight...')
                 poly_bounds = poly.total_bounds 
-                use = rxr.open_rasterio(use_path, chunks={'x':500, 'y':500}).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3]))
+                use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3]))
                 use_weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat,  method='nearest', tolerance=res/2)
                 ds['weight'] = ds.weight*use_weight
                 print(f'weight after use weight {ds.weight.sum().load()}')
