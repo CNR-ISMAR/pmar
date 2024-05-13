@@ -11,6 +11,7 @@ from joblib import Parallel, delayed
 from copy import deepcopy
 import rioxarray as rxr
 import matplotlib.pyplot as plt
+import time 
 
 class PMARCaseStudy(object):
     """
@@ -79,7 +80,8 @@ class PMARCaseStudy(object):
         self.loglevel = loglevel
         self.hdiff = 10
         self.decay_rate = 0
-        self.start_time_delay = 0
+        #self.start_time_delay = 0
+        self.start_time = '2019-01-01'
         self.s_bounds = s_bounds
         pass
 
@@ -108,7 +110,7 @@ class PMARCaseStudy(object):
         self.lpt = LagrangianDispersion(context=self.context, poly_path=self.poly_path, basedir=self.basedir, netrc_path=self.netrc_path)        
         self.runtypelevel=runtypelevel
         
-        self.lpt.repeat_run(reps=int(np.round(365/self.tshift)), start_time=(datetime(2019,1,1)+self.start_time_delay).strftime("%Y-%m-%d"), tshift=self.tshift, ptot=self.ptot, s_bounds=self.s_bounds, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate, loglevel=self.loglevel)
+        self.lpt.repeat_run(reps=int(np.round(365/self.tshift)), start_time=self.start_time, tshift=self.tshift, ptot=self.ptot, s_bounds=self.s_bounds, duration_days=self.duration, tstep=self.tstep, particle_status=self.particle_status, hdiff=self.hdiff, decay_rate=self.decay_rate, loglevel=self.loglevel) # here would have to put start_time = self.start_time if removing starttime delay
         pass
 
 
@@ -300,13 +302,13 @@ class PMARCaseStudySUA(CaseStudySUA):
         # D = 2 # number of variables
         
         self.add_problem_var(['time_var', 'duration', 'duration'], # length of the simulation in days # ['duration_days', 'duration', label], "label" is for tools4msp like ENV, USEPRE ecc
-                     [36, 108], # bounds # tra 1 mese e 3 mesi (cioè una stagione)
+                     [30, 90], # bounds # tra 1 mese e 3 mesi (cioè una stagione)
                      'unif', # distribution
                      #group_label if self.bygroup else None
                      )
 
         self.add_problem_var(['time_var', 'tstep', 'tstep'], # length of timestep in hours
-                     [2, 4], # bounds # 4 is the max at the 90th percentile of particle velocity for 4km resolution of raster
+                     [1, 6], # bounds # 4 is the max at the 90th percentile of particle velocity for 4km resolution of raster
                      'unif', # distribution
                      #group_label if self.bygroup else None
                      )
@@ -335,11 +337,17 @@ class PMARCaseStudySUA(CaseStudySUA):
                      #group_label if self.bygroup else None
                      )    
 
-        self.add_problem_var(['time_var', 'start_time_delay', 'start_time_delay'], # start time of first rep of each run is 2019-01-01 + start_time_delay
-                     [0, 365], 
+        #self.add_problem_var(['time_var', 'start_time_delay', 'start_time_delay'], # start time of first rep of each run is 2019-01-01 + start_time_delay
+         #            [0, 365], 
+          #           'unif', # distribution
+                     #group_label if self.bygroup else None
+           #          )    
+
+        self.add_problem_var(['time_var', 'start_time', 'start_time'], # start time of first rep of each run 
+                     [1420070400.0, 1609372800.0], # the range is given by what is available on CMEMS black sea physics reanalysis. e.g. from 2015 to 2020 we have both wind and currents and we 
                      'unif', # distribution
                      #group_label if self.bygroup else None
-                     )    
+                     )   
     
     def set_params(self, params, module_cs=None):
         """
@@ -360,7 +368,8 @@ class PMARCaseStudySUA(CaseStudySUA):
         module_cs.duration = params[0]
         module_cs.tstep = timedelta(hours=params[1])
         module_cs.tshift = params[2]
-        module_cs.start_time_delay = timedelta(days=params[3])
+        #module_cs.start_time_delay = timedelta(days=params[3])
+        module_cs.start_time = time.strftime('%Y-%m-%d', time.localtime(params[3])) ### ensure it's the correct index with params
 
     def runall(self, nruns, calc_second_order=False, njobs=1):
         self.set_problem()
