@@ -12,6 +12,7 @@ from copy import deepcopy
 import rioxarray as rxr
 import matplotlib.pyplot as plt
 import time 
+import geopandas as gpd
 
 class PMARCaseStudy(object):
     """
@@ -138,14 +139,19 @@ class RunningStats2D:
     def push(self, x):
         self.n += 1
 
+        
+        
         # mean and variances
         if self.n == 1:
             self.old_m = self.new_m = x
             self.old_s = np.zeros_like(x)
+            print(f'######################### old_m {self.old_m.shape}, new_m {self.new_m.shape}, x {x.shape}')
+
             if self.percentiles is not None:
                 for p in self.percentiles:
                     self._convergence_arrays.append(np.zeros_like(x))
         else:
+            print(f'######################### old_m {self.old_m.shape}, new_m {self.new_m.shape}, x {x.shape}')
             self.new_m = self.old_m + (x - self.old_m) / self.n
             self.new_s = self.old_s + (x - self.old_m) * (x - self.new_m)
 
@@ -280,9 +286,9 @@ class PMARCaseStudySUA(CaseStudySUA):
     set_params()
         Method used to correctly feed the sampled values of each variables to the lpt run. 
     """
-    def __init__(self, module_cs_params=None, nparams=40, bygroup=True, calc_second_order=False,
+    def __init__(self, module_cs_params=None, calc_second_order=False,
                  kwargs_run={}):
-        super().__init__(module_cs_params) # this calls the init from the parent class, and adds the following line
+        super().__init__(module_cs_params, calc_second_order=calc_second_order) # this calls the init from the parent class, and adds the following line
         if module_cs_params is not None:
             self.module_cs = PMARCaseStudy(**self.module_cs_params)
     
@@ -365,35 +371,36 @@ class PMARCaseStudySUA(CaseStudySUA):
         if module_cs is None:
             module_cs = self.module_cs
             
-        module_cs.duration = params[0]
+        module_cs.duration = params[0] 
         module_cs.tstep = timedelta(hours=params[1])
         module_cs.tshift = params[2]
         #module_cs.start_time_delay = timedelta(days=params[3])
-        module_cs.start_time = time.strftime('%Y-%m-%d', time.localtime(params[3])) ### ensure it's the correct index with params
-
+        module_cs.start_time = time.strftime('%Y-%m-%d', time.localtime(params[3])) 
+        if params[1] == 2.5234375 and params[0] == 73.59375: ### this is to avoid a bug in OpenDrift which has been addressed in Slack by Sofia on 4/06/24
+            print('########## ROUNDING TSTEP !!!!! ######')
+            module_cs.tstep = timedelta(hours=np.round(params[1],1))
+            print('#####################', module_cs.tstep) 
+            
     def runall(self, nruns, calc_second_order=False, njobs=1):
         self.set_problem()
         samples = self.sample(nruns, calc_second_order)
         #logger.debug('Samples={} calc_second_order={}'.format(len(samples), calc_second_order))
         model_output_stats = RunningStats2D(percentiles=None) # initialise objects of class runningstats2d
-        print('model_output_stats #1', model_output_stats) # debugging 6/03/24
+        #print('model_output_stats #1', model_output_stats) # debugging 6/03/24
         # TODO: add parallelization
         
         def _single_run(i, params):
-            print("########", i, params)
-            
-            module_cs = deepcopy(self.module_cs)
-            #module_cs = PMARCaseStudy(**self.module_cs_params)
-            #self.module_cs = module_cs
+            print("########", i, params)    
+                  
+            module_cs = deepcopy(self.module_cs) 
+                
             self.set_params(params, module_cs=module_cs)
             module_cs.run(runtypelevel=0, **self.kwargs_run)
             model_output = module_cs.get_main_output()
+            print(model_output.max(), model_output.min())
             model_output_stats.push(model_output) # as input for method push (x) give model output, which in this case is r0
-            print('model_output_stats #2', model_output_stats) # debugging 6/03/24
             target_value = module_cs.get_SUA_target()
-            print('target_value', target_value)
-            #target_value = 1
-            #logger.debug('run {} target={}'.format(i, target_value))
+
             return target_value
             
         with Parallel(n_jobs=njobs, backend='threading', require='sharedmem') as parallel:
@@ -409,11 +416,11 @@ class PMARCaseStudySUA(CaseStudySUA):
         #     logger.debug('run {} target={}'.format(i, target_value))
         self.model_output_stats = model_output_stats
         self.target_values = np.array(target_values)
-        print(self.model_output_stats, self.target_values)
+        #print(self.model_output_stats, self.target_values)
         
 
     #### addition by sofbo
-    def readall(self, path_to_output, njobs=1):
+    def readall(self, path_to_output, njobs=1, clip=None):
         """ 
         Read previously made outputs. Feeds model_output directly.
         
@@ -421,6 +428,8 @@ class PMARCaseStudySUA(CaseStudySUA):
         ----------
         path_to_output : str
             String containing the path to the output files to be analysed.
+        clip : str
+            Path to shapefile with polygon used to clip raster
         """
         self.set_problem()
         #samples = self.sample(nruns, calc_second_order)
@@ -435,8 +444,15 @@ class PMARCaseStudySUA(CaseStudySUA):
             #self.module_cs = module_cs ### COMMENTING TO TEST, 08/01/24
             #self.set_params(params, module_cs=module_cs)
             #module_cs.run(runtypelevel=0, **self.kwargs_run)
+            print(outputs) # printing file names
             model_output = rxr.open_rasterio(outputs).isel(band=0).drop('band')
-            model_output_stats.push(model_output)
+
+            # clip the raster to focus analysis on a specific region
+            if clip is not None:
+                poly = gpd.read_file(str(clip))
+                model_output = model_output.rio.clip(poly.geometry.values, poly.crs, drop=False)
+                
+            model_output_stats.push(model_output.data)
             target_value = model_output.sum()
             #logger.debug('run {} target={}'.format(i, target_value))
             return target_value

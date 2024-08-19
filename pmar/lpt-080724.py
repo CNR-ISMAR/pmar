@@ -40,8 +40,6 @@ import json
 from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
-from rasterio.enums import Resampling
-
 #from dask.distributed import Client
 
 logger = logging.getLogger("LagrangianDispersion")
@@ -51,14 +49,6 @@ PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 
 #client = Client(n_workers=4, threads_per_worker=2)
-
-def rasterhd2raster(raster_hd, grid):                                                                                                                                                    
-    raster = (raster_hd                                                                                                                                                                  
-              .rio.reproject_match(grid, nodata=0, resampling=Resampling.sum)                                                                                                        
-              .where(~grid.isnull())                                                                                                                                                     
-              .rio.write_nodata(np.nan)                                                                                                                                                  
-              )                                                                                                                                                                          
-    return raster 
 
 class PMARCache(object):
     def __init__(self, cachedir): # cachedir è una sottodirectory di basedir
@@ -187,10 +177,8 @@ class LagrangianDispersion(object):
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
         self._polygon_grid = None
-        self._x_e = None
-        self._y_e = None
-        self._x_c = None
-        self._y_c = None
+        self._x_grid = None
+        self._y_grid = None
         self.res = None
         self.weight = None
         
@@ -244,11 +232,11 @@ class LagrangianDispersion(object):
                 #    logger.warning(f'Repetition of origin_marker value detected. Please specify number of reps.')
 
             
-            #self.get_ds # this should not be automatic, sometimes it is too heavy and useless  
+            self.get_ds
             
             # if a particle_path is given, meaning a run with those configs already exists, the poly_path contained in the file's attributes "wins" over poly_path
-            #if self.ds.poly_path is not None:
-             #   self.poly_path = str(self.ds.poly_path)            
+            if self.ds.poly_path is not None:
+                self.poly_path = str(self.ds.poly_path)            
     
     def get_userinfo(self, machine):
         try:
@@ -262,14 +250,14 @@ class LagrangianDispersion(object):
 
     
     def x_grid(self):
-        if self._x_e is None:
+        if self._x_grid is None:
             raise Error('polygon_grid needs to be called before using this method')
-        return self._x_e
+        return self._x_grid
 
     def y_grid(self):
-        if self._y_e is None:
+        if self._y_grid is None:
             raise Error('polygon_grid needs to be called before using this method')
-        return self._y_e
+        return self._y_grid
         
     def polygon_grid(self, r_bounds=None, force=False):
         if self._polygon_grid is not None and not force:
@@ -304,13 +292,8 @@ class LagrangianDispersion(object):
         print('intersecting grid with poly')
         intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
         self._polygon_grid = intersect
-        
-        self._x_e = np.array(cols) # outer edge coordinates
-        self._y_e = np.array(rows)
-        self._x_c = np.unique(self._polygon_grid.centroid.x.values.round(4)) # centroid coordinates
-        self._y_c = np.unique(self._polygon_grid.centroid.y.values.round(4))
-        
-        
+        self._x_grid = np.array(cols)
+        self._y_grid = np.array(rows)
         return intersect
 
     @property
@@ -924,9 +907,8 @@ class LagrangianDispersion(object):
 
         
         pass
-        
-    
-    def particle_raster(self, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='sum', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
+
+    def particle_raster(self, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
         """
         Method to compute a 2D horizontal histogram of particle concentration using the xhistogram.xarray package. 
         
@@ -978,213 +960,191 @@ class LagrangianDispersion(object):
         else:
             particle_path = self.particle_path
         
-        _ds = self.get_ds 
-        print(_ds)
-        
-        #### FILTER PARTICLES BY STATUS ####
-        status = {'active': 0, 'stranded': 1, 'seafloor': 2}
-        if particle_status in status.keys():
-            traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
-            ds = _ds.sel(trajectory=traj)
-        else: 
-            print('no filtering by status')
-            ds = _ds
+        for idx, path in enumerate(particle_path):
+            _ds = xr.open_dataset(path, chunks={'trajectory': 1000, 'time':20})
+
+            #print(_ds)
+            print(f'path = {path}, origin_marker = {_ds.origin_marker.maxval}')
+            
     
-        ### TIME INTERPOLATION ###
-        if tinterp is not None:
-            print('time interpolation')
-            new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
-            ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
-            ds['tinterp'] = tinterp
-            
-
-        if self.poly_path == None and r_bounds == None:
-            raise ValueError("No spatial domain found to perform aggregation. Please specify 'poly_path' or 'r_bounds' manually.")
+            #### FILTER PARTICLES BY STATUS ####
+            status = {'active': 0, 'stranded': 1, 'seafloor': 2}
+            if particle_status in status.keys():
+                traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
+                ds = _ds.sel(trajectory=traj)
+            else: 
+                ds = _ds
         
-        #### WEIGHT ####   
-        # default weight is 1
-        print('weight = 1')
-        ds = ds.assign({'weight': (('trajectory'), np.ones(len(ds.trajectory)))})
-        #w = np.ones((len(ds.trajectory)))/len(ds.time)
-        # we divided it by the number of tsteps, so that the final time integral is conserved (sorgente continua)
-        ds['weight'] = ds.weight/len(ds.time)
-        print(f'weight after time division {ds.weight.sum().load().data}')
-        
-        print('calculating grid')
-        grid = self.polygon_grid(r_bounds=r_bounds)
-        _bins = np.zeros((grid.shape))
-        print(_bins.shape)
-        _bins[:,0] = np.array(grid.centroid.x) 
-        _bins[:,1] = np.array(grid.centroid.y)  
-        print('calculating bin number at time 0')
-        func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
-        print('bin_n ufunc')
-        ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=0).lon, ds.isel(time=0).lat, vectorize=True, dask='parallelized')
- 
-        # once we have the bin_n of each particle at t0, we can count how many particles were in each bin and divide the weight by that number.
-        print('bin_n groupby')
-        _w = ds.weight.groupby(ds.isel(time=0).bin_n_t0)/ds.isel(time=0).bin_n_t0.groupby(ds.isel(time=0).bin_n_t0).count()
-        #print(f'################ _w = {w.groupby(ds.isel(time=0).bin_n_t0)}')
-        print('assigning weight to ds')
-        ds = ds.assign({'weight':(('trajectory', 'time'), _w.broadcast_like(ds.lon).data)})
-        print(f'weight after groupby bin {ds.weight.sum().load().data}')
-
-        
-        #### AVOID DOUBLE-COUNTING IF THE SAME PARTICLE STAYS IN THE SAME CELL ####
-        # find the bin number. 
-        # make a temporary histogram at time 0 (as that is the time where particles are evenly distributed), stack it and drop bins where there are no particles.
-        # this is so that we only consider bins within our bounding box where there are particles (e.g. excluding land ones).
-        if traj_dens == True:
-            print('calculating bin numbers...')
-            def find_bin_n(a, b):
-                # this allows us to exclude bins with no particles 
-                hs = histogram(ds.isel(time=0).lon, ds.isel(time=0).lat, bins=[xbin, ybin]).transpose().stack(bin = ('lat_bin', 'lon_bin'))
+            ### TIME INTERPOLATION ###
+            if tinterp is not None:
+                new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
+                ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
+                ds['tinterp'] = tinterp
                 
-                _bins = np.zeros((len(hs.where(hs>0).dropna('bin').lon_bin.data), 2)) # we are only taking bins where there are particles
-                _bins[:,0] = hs.where(hs>0).dropna('bin').lon_bin.data
-                _bins[:,1] = hs.where(hs>0).dropna('bin').lat_bin.data
-                
-                func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
-                return xr.apply_ufunc(func, a, b, vectorize=True, dask='parallelized'), len(_bins)
+
+            if self.poly_path == None and r_bounds == None:
+                raise ValueError("No spatial domain found to perform aggregation. Please specify 'poly_path' or 'r_bounds' manually.")
             
-            # assign this new variable, bin number, to the ds
-            bin_n, total_bins = find_bin_n(ds.lon, ds.lat)
-            ds = ds.assign({'bin_n': bin_n})
-    
-            print('fixing double counts...')
-            # once the bin number is found, we can use that to avoid double counting of particles:
-            dss = ds.stack(s=('trajectory', 'time')) # stack trajectory and time into one dimension
-            _w = ds.weight.copy() # extract weight and add bin_n as a coordinate in this new dataarray
-            _w['bin_n'] = ds.bin_n
-            _trajectory = ds.trajectory.data # trajectory and bin_n here are needed for expected group in xarray_reduce, a compulsory parameter to use dask with flox
-            _bin_n = np.arange(0,total_bins)
-            # xarray_reduce basically performs a groupby on the weight by trajectory and then bin_n, then aggregates with function "count"
-            print('groupby...')
-            w = xarray_reduce(_w, 'trajectory', 'bin_n', func='count', method='blockwise', expected_groups=(_trajectory, _bin_n)) # blockwise and expected groups are needed for dask
-            w = w.stack(s=('trajectory', 'bin_n')) # stack trajectory and bin into one dimension
-            # create a multiindex variable to index weight with
-            print('creating multiindex...')
-            t_0 = T.time()
-            arrays = [dss.trajectory.data, dss.bin_n.load().data] 
-            i = pd.MultiIndex.from_arrays(arrays, names=('trajectory', 'bin_n'))
-            # weight with no double counting is equal to the original weight (at this point, still 1), divided by the number of times the particle remained in that cell
-            elapsed = (T.time() - t_0)
-            print("--- multiindex calculated in %s minutes ---" % timedelta(minutes=elapsed))
-            print('calculating new weight...')
-            dss['weight'].data = dss.weight.data/w.sel(s=i).data
-            ds['weight'] = dss.weight.unstack()
-        #else:
-            ### BEACHED PARTICLES ###
-            ### maybe not needed anymore since i am doing the avoid double counting thing ###
-            # for each trajectory, select all timesteps where particle is still active (status=0), propagate its weight forward by one timestep, refill the nans with 0. 
-            # this way, we are able to visualise the beached particles but their weight doesn't add up for each timestep that they are in that same position.        
-            #ds['weight'] = ds.weight.where(ds.status==0).load().ffill('time', limit=1).fillna(0) 
-
-        # apply use weight 
-        if use_path != 'even':
-            print('applying use weight...')
-            poly_bounds = grid.total_bounds
-            _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0)
-
-            _gr = xr.DataArray(np.zeros((len(self._x_c), len(self._y_c))), coords={'x': self._x_c, 'y': self._y_c})
-
-            gr = (
-                xr.DataArray(_gr) # need to transpose it because xhistogram does that for some reason
-                .rio.write_nodata(np.nan)
-                .rio.write_crs('epsg:4326')
-                .rio.write_coordinate_system())
-
-            use = rasterhd2raster(_use, gr) # resampling the use raster on our grid, with user-defined res and crs
+            #### WEIGHT ####   
+            # default weight is 1
+            print('weight = 1')
+            ds = ds.assign({'weight': (('trajectory', 'time'), np.ones((ds.lon.shape)))})
+            # we divided it by the number of tsteps, so that the final time integral is conserved (sorgente continua)
+            ds['weight'] = ds.weight/len(ds.time)
+            print(f'weight after time division {ds.weight.sum().load().data}')
             
-            use_weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat,  method='nearest') ### TODO capire bene tolerance. with the new resampling method, could do tolerance=res/2?
+            print('calculating grid')
+            grid = self.polygon_grid(r_bounds=r_bounds)
+            _bins = np.zeros((grid.shape))
+            print(_bins.shape)
+            _bins[:,0] = np.array(grid.centroid.x) 
+            _bins[:,1] = np.array(grid.centroid.y)  
+            print('calculating bin number at time 0')
+            func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
+            print('bin_n ufunc')
+            ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=0).lon, ds.isel(time=0).lat, vectorize=True, dask='parallelized')
+     
+            # once we have the bin_n of each particle at t0, we can count how many particles were in each bin and divide the weight by that number.
+            print('bin_n groupby')
+            _w = ds.isel(time=0).weight.groupby(ds.isel(time=0).bin_n_t0)/ds.isel(time=0).bin_n_t0.groupby(ds.isel(time=0).bin_n_t0).count()
+            print(f'################ _w = {ds.isel(time=0).weight.groupby(ds.isel(time=0).bin_n_t0)}')
+            print('assigning weight to ds')
+            ds = ds.assign({'weight':(('trajectory', 'time'), _w.broadcast_like(ds.weight).data)})
+            print(f'weight after groupby bin {ds.weight.sum().load().data}')
 
-            print(f'WEIGHT == 0 {use_weight.where(use_weight==0).count().data}')
-            print(f'WEIGHT != 0 {use_weight.where(use_weight!=0).count().data}')
             
-            ds['weight'] = ds.weight*use_weight
-            print(f'weight after use weight {ds.weight.sum().load().data}')
-
-        
-        # FILTER OUT PARTICLES WHERE WEIGHT IS 0 AT START TIME TO FREE UP MEMORY.
-        # NB: filter out entire TRAJECTORIES of particles which are released in cells where use layer is 0. this is done by extracting their particle ID. 
-        # this actually takes a long time to calculate...
-            print('COMMENTED THIS AND DECAY RATE removing particles where weight was 0')
-            #p_id = ds.isel(time=0).where(ds.weight.isel(time=0)!=0).dropna('trajectory').trajectory.data
-            #ds = ds.sel(trajectory=p_id)
-        
-        #### CONTINUOUS RELEASE ####
-        # we are simulating continuous release by giving particles weight = (total_timestpes - timestep_index).
-        # this way, it is as if at each timestep a new particle were released from the same starting position. 
-        # this relies on the assumption that a particle released from the same location would follow the same trajectory.
-        # the result is more particles closer to the use (which is the source). 
-        #cont_release = (np.arange(-len(ds.time),0)*-1)
-        #ds['weight'] = ds.weight*cont_release
-        
-        #print('applying decay rate...')
-        ### DECAY RATE ####
-        #k = decay_rate #decay coefficient given by user
-        #y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function
-        #ds['decay'] = y  
-        #ds['weight'] = ds.weight*ds.decay
-        #print(f'weight after decay rate {ds.weight.sum().load()}')
-
-        self.weight = ds.weight
-        
-        #### HISTOGRAMS. 2 CASES: 2D or 3D ####
-        if self.depth is None:
-            if len(np.unique(ds.z)) > 2:
-                self.depth = True
-            else:
-                self.depth = False
-        else:
-            pass
-        
-        # 3D
-        if self.depth == True:
-            ds = ds.assign(depth=-ds.z)
-            # condition to filter out ds based on depth_layer
-            cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
-            
-            if depth_layer in cond.keys():
-                ds = ds.where(cond[depth_layer])
-                
-        elif self.depth == False:
-            print('this is a 2d simulation')
-            pass
-        else:
-            raise ValueError('cannot detect whether 2D or 3D')
+            #### AVOID DOUBLE-COUNTING IF THE SAME PARTICLE STAYS IN THE SAME CELL ####
+            # find the bin number. 
+            # make a temporary histogram at time 0 (as that is the time where particles are evenly distributed), stack it and drop bins where there are no particles.
+            # this is so that we only consider bins within our bounding box where there are particles (e.g. excluding land ones).
+            if traj_dens == True:
+                print('calculating bin numbers...')
+                def find_bin_n(a, b):
+                    # this allows us to exclude bins with no particles 
+                    hs = histogram(ds.isel(time=0).lon, ds.isel(time=0).lat, bins=[xbin, ybin]).transpose().stack(bin = ('lat_bin', 'lon_bin'))
                     
-        print('calculating histograms...')
-
-        _slice = 4000 # slicing every 4000 trajectories
-        for i in np.arange(0,len(ds.trajectory),_slice):
-            xbin = self._x_e
-            ybin = self._y_e
-            d = ds.isel(trajectory=slice(i,i+_slice))
-            print(f'computing h for slice {i}, trajectories {d.trajectory.data}')
-            hh = histogram(d.lon, d.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=d.weight, block_size='auto')
-            print('writing temporary netcdf')
-            hh.to_netcdf(f'{qtemp.name}/temphist_{i}.nc') 
-            print(f'Raster done for rep {i}')
-
-            ######### for debugging, 9/7/24
-            print(f'writing tif for rep {i}')
-            hhh = (
-                xr.DataArray(hh.transpose()) # need to transpose it because xhistogram does that for some reason
-                .rio.write_nodata(np.nan)
-                .rio.write_crs('epsg:4326')
-                .rio.write_coordinate_system())
-            hhh.rio.to_raster(f'raster-rep-{i}.tif')
-            ##################################
+                    _bins = np.zeros((len(hs.where(hs>0).dropna('bin').lon_bin.data), 2)) # we are only taking bins where there are particles
+                    _bins[:,0] = hs.where(hs>0).dropna('bin').lon_bin.data
+                    _bins[:,1] = hs.where(hs>0).dropna('bin').lat_bin.data
+                    
+                    func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
+                    return xr.apply_ufunc(func, a, b, vectorize=True, dask='parallelized'), len(_bins)
+                
+                # assign this new variable, bin number, to the ds
+                bin_n, total_bins = find_bin_n(ds.lon, ds.lat)
+                ds = ds.assign({'bin_n': bin_n})
         
-            print(f'Raster done for rep {i}')
+                print('fixing double counts...')
+                # once the bin number is found, we can use that to avoid double counting of particles:
+                dss = ds.stack(s=('trajectory', 'time')) # stack trajectory and time into one dimension
+                _w = ds.weight.copy() # extract weight and add bin_n as a coordinate in this new dataarray
+                _w['bin_n'] = ds.bin_n
+                _trajectory = ds.trajectory.data # trajectory and bin_n here are needed for expected group in xarray_reduce, a compulsory parameter to use dask with flox
+                _bin_n = np.arange(0,total_bins)
+                # xarray_reduce basically performs a groupby on the weight by trajectory and then bin_n, then aggregates with function "count"
+                print('groupby...')
+                w = xarray_reduce(_w, 'trajectory', 'bin_n', func='count', method='blockwise', expected_groups=(_trajectory, _bin_n)) # blockwise and expected groups are needed for dask
+                w = w.stack(s=('trajectory', 'bin_n')) # stack trajectory and bin into one dimension
+                # create a multiindex variable to index weight with
+                print('creating multiindex...')
+                t_0 = T.time()
+                arrays = [dss.trajectory.data, dss.bin_n.load().data] 
+                i = pd.MultiIndex.from_arrays(arrays, names=('trajectory', 'bin_n'))
+                # weight with no double counting is equal to the original weight (at this point, still 1), divided by the number of times the particle remained in that cell
+                elapsed = (T.time() - t_0)
+                print("--- multiindex calculated in %s minutes ---" % timedelta(minutes=elapsed))
+                print('calculating new weight...')
+                dss['weight'].data = dss.weight.data/w.sel(s=i).data
+                ds['weight'] = dss.weight.unstack()
+            #else:
+                ### BEACHED PARTICLES ###
+                ### maybe not needed anymore since i am doing the avoid double counting thing ###
+                # for each trajectory, select all timesteps where particle is still active (status=0), propagate its weight forward by one timestep, refill the nans with 0. 
+                # this way, we are able to visualise the beached particles but their weight doesn't add up for each timestep that they are in that same position.        
+                #ds['weight'] = ds.weight.where(ds.status==0).load().ffill('time', limit=1).fillna(0) 
+    
+            # apply use weight 
+            if use_path != 'even':
+                print('applying use weight...')
+                poly_bounds = grid.total_bounds
+                use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0)
+                use_weight = use.sel(x=ds.isel(time=0).lon, y=ds.isel(time=0).lat,  method='nearest', tolerance=res*2) ### TODO capire bene tolerance
+
+                print(f'WEIGHT == 0 {use_weight.where(use_weight==0).count().data}')
+                print(f'WEIGHT != 0 {use_weight.where(use_weight!=0).count()}.data')
+                
+                ds['weight'] = ds.weight*use_weight
+                print(f'weight after use weight {ds.weight.sum().load().data}')
+
+            
+            # FILTER OUT PARTICLES WHERE WEIGHT IS 0 AT START TIME TO FREE UP MEMORY.
+            # NB: filter out entire TRAJECTORIES of particles which are released in cells where use layer is 0. this is done by extracting their particle ID. 
+            # this actually takes a long time to calculate...
+                print('removing particles where weight was 0')
+                p_id = ds.isel(time=0).where(ds.weight.isel(time=0)!=0).dropna('trajectory').trajectory.data
+                ds = ds.sel(trajectory=p_id)
+            
+            #### CONTINUOUS RELEASE ####
+            # we are simulating continuous release by giving particles weight = (total_timestpes - timestep_index).
+            # this way, it is as if at each timestep a new particle were released from the same starting position. 
+            # this relies on the assumption that a particle released from the same location would follow the same trajectory.
+            # the result is more particles closer to the use (which is the source). 
+            #cont_release = (np.arange(-len(ds.time),0)*-1)
+            #ds['weight'] = ds.weight*cont_release
+            
+            print('applying decay rate...')
+            ### DECAY RATE ####
+            k = decay_rate #decay coefficient given by user
+            y = np.exp(-k*(ds.time-ds.time.min()).astype(int)/60/60/1e9/24) #decay function
+            ds['decay'] = y  
+            ds['weight'] = ds.weight*ds.decay
+            print(f'weight after decay rate {ds.weight.sum().load()}')
+
+            self.weight = ds.weight
+            
+            #### HISTOGRAMS. 2 CASES: 2D or 3D ####
+            if self.depth is None:
+                if len(np.unique(ds.z)) > 2:
+                    self.depth = True
+                else:
+                    self.depth = False
+            else:
+                pass
+            
+            # 3D
+            if self.depth == True:
+                ds = ds.assign(depth=-ds.z)
+                # condition to filter out ds based on depth_layer
+                cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
+                
+                if depth_layer in cond.keys():
+                    ds = ds.where(cond[depth_layer])
+                    
+            elif self.depth == False:
+                pass
+            else:
+                raise ValueError('cannot detect whether 2D or 3D')
+                        
+            print('calculating histograms...')
+            print(f'computing h for rep {idx}')
+            #xbin = np.sort(np.unique(grid.boundary.get_coordinates().x))
+            #ybin = np.sort(np.unique(grid.boundary.get_coordinates().y))
+            xbin = self._x_grid
+            ybin = self._y_grid
+            hh = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=ds.weight, block_size='auto')#.sum('time') #.chunk({'lon_bin':10, 'lat_bin': 10})
+
+            print('writing temporary netcdf...')
+            print(f'### sum of raster rep {idx}: {hh.sum().load().data}')
+            hh.to_netcdf(f'{qtemp.name}/temphist_{idx}.nc') 
+            print(f'Raster done for rep {idx}')
                 
         #### AGGREGATION METHOD ####
-        print('aggregating slices...')
+        print('aggregating reps...')
         if aggregate == 'mean':    
+            print('############################# doing the sum!')
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
         elif aggregate == 'sum': 
-            print('############### doing the sum!')
+            print('############################# doing the mean!')
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').sum('slices').histogram_lon_lat
         elif aggregate == 'max': 
             _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
@@ -1235,141 +1195,6 @@ class LagrangianDispersion(object):
         
         return r
 
-
-    def residence_time(self, res=0.04, crs='4326', tinterp=None, r_bounds=None, use_path='even', use_label='even', decay_rate=None, aggregate='mean', depth_layer='full_depth', z_bounds=[1,-10], particle_status='all', traj_dens=False, save_r=True):
-    
-        t_0 = T.time()
-
-        qtemp = tempfile.TemporaryDirectory("raster", dir=self.basedir)
-        #res = res*1e-5 ### conversion to lat, lon TO BE FIXED
-        self.res = res # otherwise polygon_grid does not work if launching only particle_raster and not run or repeat_run
-
-        #### TURNING particle_path INTO A LIST FOR EASIER ITERATION OVER REPS. ###
-        if type(self.particle_path) == str:
-            particle_path = [self.particle_path]
-        else:
-            particle_path = self.particle_path
-        
-        for idx, path in enumerate(particle_path):
-            _ds = xr.open_dataset(path, chunks={'trajectory': 1000, 'time':20})
-
-            #print(_ds)
-            print(f'path = {path}, origin_marker = {_ds.origin_marker.maxval}')
-            
-    
-            #### FILTER PARTICLES BY STATUS ####
-            status = {'active': 0, 'stranded': 1, 'seafloor': 2}
-            if particle_status in status.keys():
-                traj = _ds.trajectory.where(_ds.isel(time=-1).status==status[particle_status]).dropna('trajectory').data
-                ds = _ds.sel(trajectory=traj)
-            else: 
-                ds = _ds
-        
-            ### TIME INTERPOLATION ###
-            if tinterp is not None:
-                new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=tinterp)) #new time variables used for interpolation
-                ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
-                ds['tinterp'] = tinterp
-                
-
-            if self.poly_path == None and r_bounds == None:
-                raise ValueError("No spatial domain found to perform aggregation. Please specify 'poly_path' or 'r_bounds' manually.")
-
-            
-            #### HISTOGRAMS. 2 CASES: 2D or 3D ####
-            if self.depth is None:
-                if len(np.unique(ds.z)) > 2:
-                    self.depth = True
-                else:
-                    self.depth = False
-            else:
-                pass
-            
-            # 3D
-            if self.depth == True:
-                ds = ds.assign(depth=-ds.z)
-                # condition to filter out ds based on depth_layer
-                cond = {'surface': ds.depth<=z_bounds[0], 'seafloor': ds.depth>(ds.sea_floor_depth_below_sea_level+z_bounds[1]), 'water_column': np.logical_and(ds.depth>z_bounds[0], ds.depth<-z_bounds[1]), 'mixed_layer': ds.depth <= ds.ocean_mixed_layer_thickness}
-                
-                if depth_layer in cond.keys():
-                    ds = ds.where(cond[depth_layer])
-                    
-            elif self.depth == False:
-                pass
-            else:
-                raise ValueError('cannot detect whether 2D or 3D')
-                        
-            print('calculating histograms...')
-            print(f'computing h for rep {idx}')
-            
-            grid = self.polygon_grid(r_bounds=r_bounds)
-            xbin = self._x_e
-            ybin = self._y_e
-            print(len(ds.trajectory))
-            #print('xbin', xbin, 'ybin', ybin)
-            hh = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=['time', 'trajectory'], block_size='auto')#.mean('trajectory').chunk({'lon_bin':10, 'lat_bin': 10})
-            
-            print(f'writing temporary netcdf to {qtemp.name}...')
-            #print(f'### sum of raster rep {idx}: {hh.sum().load().data}')
-            hh.to_netcdf(f'{qtemp.name}/temphist_{idx}.nc') 
-            
-            print(f'Raster done for rep {idx}')
-                
-        #### AGGREGATION METHOD ####
-        print('aggregating reps...')
-        if aggregate == 'mean':    
-            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').mean('slices').histogram_lon_lat            
-        elif aggregate == 'sum': 
-            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').sum('slices').histogram_lon_lat
-        elif aggregate == 'max': 
-            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').max('slices').histogram_lon_lat
-        elif aggregate.startswith('p'):
-            quantile = eval(aggregate.split('p')[-1])/100
-            _h = xr.open_mfdataset(f'{qtemp.name}/temphist*.nc', concat_dim='slices', combine='nested').load().quantile(quantile, dim='slices').histogram_lon_lat # does not work unless I .load()
-        else:
-            raise ValueError("'aggregate' must be one of 'mean', 'sum', 'max' or 'p95'.")        
-
-        h = _h.transpose()   # need to transpose it because xhistogram does that for some reason
-        print(f'######################################## SUM OF TOTAL RASTER {h.sum().load().data}')
-        
-        print('creating tiff...')
-        # write geo information to xarray and save as geotiff
-        r = (
-            #xr.DataArray(h*self.tstep.seconds/60/60/24) # convert into time, in days
-            #.rio.write_nodata(np.nan)
-            xr.DataArray(h)
-            .rio.write_crs('epsg:'+str(crs))
-            .rio.write_coordinate_system())
-        
-        r=r.where(r>0).to_dataset().rename({'histogram_lon_lat': 'r0'})
-
-        ####### Landmask ######
-        if 'bs' in self.context:
-            shpfilename = f'{DATA_DIR}/polygon-bs-full-basin.shp' #use black sea polygon for masking in bs contexts
-
-        else: # otherwise, use cartopy natural earth polygon
-            import cartopy.io.shapereader as shpreader
-
-            shpfilename = shpreader.natural_earth(resolution='10m',
-                                        category='physical',
-                                        name='ocean')
-
-        _mask = gpd.read_file(shpfilename)
-
-        if particle_status in ['active', 'seafloor']:
-            mask = _mask
-        else:
-            mask = _mask.buffer(distance=0.1) # if including beached particles, consider a buffer around ocean 
-            
-        elapsed = (T.time() - t_0)
-        print("--- RASTER CREATED IN %s seconds ---" % timedelta(minutes=elapsed/60))
-        
-        if save_r == True:
-            self.raster = r
-
-        self.ds = ds
-        
-        return r
     
     def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig='thumbnail'):
         """
