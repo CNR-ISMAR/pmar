@@ -9,12 +9,12 @@ from shapely.geometry import Point, Polygon
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
 import copernicusmarine
-from opendrift.readers.reader_netCDF_CF_generic import Reader
+from opendrift.readers.reader_copernicusmarine import Reader
+#from opendrift.readers.reader_netCDF_CF_generic import Reader
 import opendrift
 from pydap.client import open_url
 from pydap.cas.get_cookies import setup_session
 import time as T
-from pathlib import Path
 from xhistogram.xarray import histogram
 import seaborn as sns
 spectral_r = sns.color_palette("Spectral_r", as_cmap=True)
@@ -27,12 +27,13 @@ import matplotlib.colors as col
 import os
 from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
-import netrc
+#import netrc
 import random
 import rasterio
 import tempfile
 from cachetools import LRUCache
 from netCDF4 import Dataset
+from pathlib import Path
 import hashlib
 import json
 from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
@@ -40,86 +41,20 @@ os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
 from rasterio.enums import Resampling
 import glob
-
+from copy import deepcopy
+from geocube.api.core import make_geocube
 #from dask.distributed import Client
+from pmar.pmar_cache import PMARCache
+from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file
 
 logger = logging.getLogger("PMAR")
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
-
-#client = Client(n_workers=4, threads_per_worker=2)
-
-def rasterhd2raster(raster_hd, grid):   
-    '''
-    Reproject raster onto a new grid. 
-    #### NOTE: this method is not conservative. use and resampled use do not have the same integral. 
-    So not using in concentration method, for now. 
-
-    Parameters
-    ----------
-    raster_hd : DataArray
-        the raster to reproject
-    grid : DataArray
-        the grid to match raster_hd to 
-    '''
-    raster = (raster_hd                                                                 
-              .rio.reproject_match(grid, nodata=0, resampling=Resampling.sum)
-              .where(~grid.isnull())
-              .rio.write_nodata(np.nan)
-             )                                                                                                                                                                          
-    return raster 
-
-class PMARCache(object):
-    def __init__(self, cachedir): # cachedir è una sottodirectory di basedir
-        self.cachedir = Path(cachedir)
-        self.cachedir.mkdir(exist_ok=True)
-        
-    def get_data_file(self, extension, **kwargs):
-        _data_file = hashlib.md5(str(sorted(kwargs.items())).encode('utf-8')).hexdigest()
-        data_file = f"{_data_file}.{str(extension)}" # chiave della cache e nome del file, generalizzata sia per calculate_trajectories che particle_raster
-        path_data_file = Path(self.cachedir) / data_file 
-        return path_data_file
-    
-    def set_metadata(self, extension, **kwargs):
-        path_data_file = self.get_data_file(extension, **kwargs)
-        path_metadata_file = str(path_data_file) + '_metadata' #TODO rendere più robusto
-        with open(path_metadata_file,'w') as fi:
-            json.dump(kwargs,fi,default=str)
-            
-    def particle_cache(self, poly_path, pnum, start_time, season, duration_days, s_bounds, z, tstep, hdiff, termvel, crs):
-        cache_key = {'poly_path': poly_path, 'pnum': pnum, 'start_time': start_time.strftime("%Y-%m-%d"), 'season': season, 'duration_days': duration_days, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs}
-        path_data_file = self.get_data_file('nc', **cache_key) # chiave della cache e nome del file
-        self.set_metadata('nc', **cache_key) #TODO spostare
-        logger.error('particle cache = '+str(cache_key))
-        return path_data_file, path_data_file.exists()
-        
-    def old_raster_cache(self, res, poly_path, pnum, ptot, duration_days, start_time, reps, tshift, s_bounds, z, tstep, hdiff, termvel, crs, tinterp, r_bounds, use_path, decay_coef, aggregate, depth_layer, z_bounds, particle_status, traj_dens):
-        cache_key = {'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration_days': duration_days, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 's_bounds': s_bounds, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs, 'tinterp': tinterp, 'r_bounds': r_bounds, 'use_path': use_path, 'decay_coef': decay_coef, 'aggregate':aggregate, 'depth_layer': depth_layer, 'z_bounds': z_bounds, 'particle_status': particle_status, 'traj_dens' : traj_dens}
-        path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
-        self.set_metadata('tif', **cache_key) #TODO spostare
-        logger.error('raster cache = '+str(cache_key))
-        return path_data_file, path_data_file.exists()
-
-    def raster_cache(self, res, poly_path, pnum, ptot, duration, start_time, reps, tshift, use_path, use_label, decay_coef, r_bounds):
-        cache_key = {'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration': duration, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 'use_path': use_path, 'use_label': use_label, 'decay_coef': decay_coef, 'r_bounds': r_bounds}
-        path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
-        #path_data_file = Path(str(_path_data_file).split('.tif')[0]+'_use-RES-TIME.tif')
-        self.set_metadata('tif', **cache_key) #TODO spostare
-        logger.error('raster cache = '+str(cache_key))
-        return path_data_file, path_data_file.exists()
-
-    def c_cache(self, res, poly_path, pnum, ptot, duration, start_time, reps, tshift, use_path, use_label, decay_coef, r_bounds):
-        cache_key = {'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration': duration, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 'use_path': use_path, 'use_label': use_label, 'decay_coef': decay_coef, 'r_bounds': r_bounds}
-        _path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
-        path_data_file = Path(str(_path_data_file).split('.tif')[0]+'_use-'+use_label+'.tif')
-        self.set_metadata('tif', **cache_key) #TODO spostare
-        logger.error('raster cache = '+str(cache_key))
-        return path_data_file, path_data_file.exists()
         
         
-class PMAR(object): # rename this? it's long and confusing
+class PMAR(object): 
     """
     Developed at CNR ISMAR in Venice.
 
@@ -146,7 +81,7 @@ class PMAR(object): # rename this? it's long and confusing
         runs OpenDrift simulation and produces desired raster
     make_poly()
         if no polygon is given for seeding, creates and writes polygon based on given lon lat
-    calculate_trajectories()
+    get_trajectories()
         runs OpenDrift simulation
     particle_raster()
         computes 2D histogram of particle concentration and writes to tif (if requested)
@@ -160,7 +95,7 @@ class PMAR(object): # rename this? it's long and confusing
     """
 
 
-    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path='cmems', wind_path='cmems', mld_path='cmems', bathy_path=None, particle_path=None, depth=False, netrc_path=None):
+    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrc_path=None):
         """
         Parameters
         ---------- 
@@ -189,9 +124,9 @@ class PMAR(object): # rename this? it's long and confusing
         """
 
         Path(basedir).mkdir(parents=True, exist_ok=True)
-        self.uv_path = None
-        self.wind_path = None
-        self.mld_path = None 
+        self.uv_path = uv_path
+        self.wind_path = wind_path
+        self.mld_path = mld_path 
         self.bathy_path = bathy_path 
         self.basedir = Path(basedir)
         self.particle_path = particle_path # i can import an existing particle_path
@@ -206,7 +141,7 @@ class PMAR(object): # rename this? it's long and confusing
         self.depth = depth
         self.termvel = 1e-3
         self.decay_coef = 0
-        self.context = context
+        self.context = self.get_context(str(context))
         self.outputdir = None
         self.pressure = pressure
         self.localdatadir = localdatadir
@@ -215,7 +150,7 @@ class PMAR(object): # rename this? it's long and confusing
         self.tshift = None
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
-        #self._polygon_grid = None
+        self._polygon_grid = None
         self._x_e = None
         self._y_e = None
         self._x_c = None
@@ -267,12 +202,16 @@ class PMAR(object): # rename this? it's long and confusing
         if self.particle_path is not None: 
 
             # gather number of reps from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
-            if type(self.particle_path) is not str: 
-                _reps = np.zeros(len(self.particle_path))
-                for idx, f in enumerate(self.particle_path):
-                    _reps[idx] = xr.open_dataset(f).origin_marker.maxval
+            if type(self.particle_path) is list: 
+                self.reps = len(particle_path)
+                
+                ###### THIS METHOD was taking reps from origin_marker, but does not work if origin marker is the same in all reps...
+                #_reps = np.zeros(len(self.particle_path))
+                #for idx, f in enumerate(self.particle_path):
+                 #   _reps[idx] = xr.open_dataset(f).origin_marker.maxval
+                    #print('#### origin marker', _reps[idx])
 
-                self.reps = len(np.unique(_reps))
+                #self.reps = len(np.unique(_reps))
                 #self.reps = int(np.max(_reps))+1
                 #if len(_reps) != len(np.unique(_reps)):
                 #    logger.warning(f'Repetition of origin_marker value detected. Please specify number of reps.')
@@ -284,15 +223,77 @@ class PMAR(object): # rename this? it's long and confusing
             #if self.ds.poly_path is not None:
              #   self.poly_path = str(self.ds.poly_path)            
     
-    def get_userinfo(self, machine):
-        try:
-            secrets = netrc.netrc(self.netrc_path)
-        except FileNotFoundError:
-            ''
-        auth = secrets.authenticators(machine)
-        if auth is None:
-            return ''
-        return f'{auth[0]}:{auth[2]}@'
+ #   def get_userinfo(self, machine):
+  #      try:
+   #         secrets = netrc.netrc(self.netrc_path)
+    #    except FileNotFoundError:
+     #       ''
+      #  auth = secrets.authenticators(machine)
+       # if auth is None:
+        #    return ''
+        #return f'{auth[0]}:{auth[2]}@'
+
+
+    def get_marine_polygon(self, basin=None):
+        # this would be very useful but e.g. the med is split into all the subbasins with no quick way to group them
+        shpfilename = shpreader.natural_earth(resolution='10m',
+                                category='physical',
+                                name='geography_marine_polys')
+        
+        gdf = gpd.read_file(shpfilename)
+
+        if basin is None:
+            marine_poly = gdf.geometry
+        else:
+            marine_poly = gdf.geometry.set_index('name').loc[str(basin)]
+
+        return marine_poly
+
+    def get_context(self, context):
+        """
+        Parameters
+        ---------- 
+        context : str
+            One of 'global', 'med', 'black sea', 'baltic'. Returns strings to relevant Copernicus products to add as OpenDrift readers. 
+        """
+        
+        contexts = {'global': {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 25 Feb 2025
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
+                      'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
+                      'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
+                      'stokes':'cmems_mod_glo_wav_my_0.2deg_PT3H-i'}, # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+           'med': {'currents': 'med-cmcc-cur-rean-d', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                  'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
+                  'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
+                  'mixed-layer': 'med-cmcc-mld-rean-d', # Mediterranean Sea Physics Reanalysis
+                  'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',  # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                   #'extent': [30.19, 45.98, -6, 36.29], # [x1,x2,y1,y2]
+                  }, 
+           'black sea': {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                      'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
+                      'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
+                      'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i'}, # Black Sea Waves Reanalysis
+           'baltic': {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                      'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
+                      'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 
+                      'stokes': 'cmems_mod_bal_wav_my_PT1H-i'} #Baltic Sea Waves Reanalysis
+           }
+
+
+        bounds = {'global': [-180, -80, 179.92, 90],
+                 'med': [-6, 30.19, 36.29, 45.98],
+                 'black sea': [27.25, 40.5, 42, 47], 
+                 'baltic': [9.04, 53.01, 30.21, 65.89],
+                 }
+
+        self.extent = bounds[context]
+        
+        if context not in contexts.keys():
+            print('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+        
+        return contexts[context]
 
     
     def x_grid(self):
@@ -309,20 +310,19 @@ class PMAR(object): # rename this? it's long and confusing
         '''
         Make grid from polygon of domain area.
         '''
-        #try:
-         #   self._polygon_grid
-         #   print('polygon_grid: _polygon_grid was previously calculated.')
-            
-        if res != self.res: 
+        
+        if res == self.res and self._polygon_grid is not None: # WRONG, i need to test if r_bounds matches too!
+            print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
+        else:
             print(f'polygon_grid: calculating new polygon_grid with resolution = {res}.')
             #res = self.res 
             crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
             
             if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
-                poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326').buffer(distance=res*3)
+                poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
                 print('polygon_grid: use r_bounds to make new polygon_grid')
             else:
-                poly = gpd.read_file(self.poly_path).to_crs(crs).buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+                poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
             
             xmin, ymin, xmax, ymax = poly.total_bounds
             
@@ -347,19 +347,26 @@ class PMAR(object): # rename this? it's long and confusing
             
             self._x_e = np.array(cols) # outer edge coordinates
             self._y_e = np.array(rows)
-            self._x_c = np.unique(self._polygon_grid.centroid.x.values.round(4)) # centroid coordinates
-            self._y_c = np.unique(self._polygon_grid.centroid.y.values.round(4))
-        else:
-            self._polygon_grid
-            print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
+            self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
+            self._y_c = np.unique(self._polygon_grid.centroid.y.values)
             
         #print('polygon_grid: done.')
         self.res = res
         print(f'updated self.res = {self.res}')
         return self._polygon_grid
 
+    def raster_grid(self, res=None, r_bounds=None):
+        grid = self.polygon_grid(res=res, r_bounds=r_bounds)
+        grid['weight'] = 1
+        _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
+        self._raster_grid = _raster_grid.weight
+        return self._raster_grid
+
     @property
     def get_ds(self):
+        # this doesnt actually work with reps, because self.ds always exists, but then it is only the last rep.
+        # i should discriminate e.g. by comparing self.ptot with self.ds.trajectory.
+        # if they don't match, i am probably only looking at the last rep. 
         try:
             self.ds
             print('get_ds: returning previously calculated ds.')
@@ -375,6 +382,10 @@ class PMAR(object): # rename this? it's long and confusing
                 # if the run contained reps, ensure trajectories have unique IDs for convenience
                 logger.error(f'self.reps = {self.reps}')
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
+
+                # if there is a use_path and particle_paths, would be nice if there was a quick way to assign use weight
+                # new addition 6 nov 24
+                #ds = self.assign_weight(weight=1) # default is to assign weight = 1 everywhere
             
             self.ds = ds
             print('get_ds: done.')
@@ -458,7 +469,7 @@ class PMAR(object): # rename this? it's long and confusing
             return poly
     
 # [pnum, start_time, season, duration_days, s_bounds, z, tstep, hdiff, termvel, crs]
-    def calculate_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, crs='4326', seeding_radius=2e3, loglevel=40):
+    def get_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, loglevel=40):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -499,19 +510,9 @@ class PMAR(object): # rename this? it's long and confusing
         """
         
         t_0 = T.time()   
-        
-        context = self.context 
- 
+         
         if termvel is None:
             termvel = self.termvel
-        
-
-        # context only makes sense for tools4msp implementation. 
-        # raise error if unsupported context is requested
-        avail_contexts = ['bridge-bs', 'med-cmems', 'bs-cmems']
-        if context not in avail_contexts:
-            raise ValueError(f"Unsupported context given. Context variable must be one of {avail_contexts}")
-        self.context = context
         
         ### time settings ####
         ssns = {'summer': datetime(2019,6,1),
@@ -526,23 +527,16 @@ class PMAR(object): # rename this? it's long and confusing
         end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
         time_step = tstep
 
-        #### REMOVING TSEED #### APRIL 2024
-        #if self.tseed is None:
-         #   self.tseed = timedelta(days=(duration_days * 20 / 100)) #tseed is 20% of total duration
-            
-        #tseed = self.tseed
-        # tseed gets added to the total duration, then removed and everything is realigned. 
-        #duration = timedelta(days=duration_days)+tseed-timedelta(days=1) # true duration of the run. the tseed time period is then deleted.
-
         duration = timedelta(days=duration_days)
         
         self.tstep = tstep
         
         # polygon used for seeding of particles (poly_path). if s_bounds are given, a new polygon is created using those bounds. 
-        if s_bounds is not None:
-            lon = s_bounds[0::2]
-            lat = s_bounds[1::2]
-            self.make_poly(lon, lat, crs=crs)
+        if s_bounds is None:
+            s_bounds = self.extent
+        lon = s_bounds[0::2]
+        lat = s_bounds[1::2]
+        self.make_poly(lon, lat, crs=crs)
         
         # path to write particle simulation file. also used for our 'cache'    
         poly = gpd.read_file(self.poly_path)
@@ -557,7 +551,7 @@ class PMAR(object): # rename this? it's long and confusing
             self.o = OceanDrift(loglevel=loglevel) 
         
         
-        file_path, file_exists = self.cache.particle_cache(poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs)
+        file_path, file_exists = self.cache.particle_cache(poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -577,83 +571,18 @@ class PMAR(object): # rename this? it's long and confusing
             self.o.add_reader([reader_landmask])
             self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
             
-            # bridge-bs context is VERY OLD, NEEDS FIXING. import relevant readers based on context
-            if context == 'bridge-bs': # local WP2 data
-                
-                if self.localdatadir is None:
-                    raise ValueError('bridge-bs data not found. Please provide absolute path to directory containing oceanographic / atmospheric data from bridge-bs, i.e. localdatadir')
-                else:    
-                    bridge_dir = Path(self.localdatadir) ## ??????
-                
-                dates = pd.date_range(start_time.strftime("%Y-%m-%d"),(start_time+duration).strftime("%Y-%m-%d"),freq='d').strftime("%Y-%m-%d").tolist()
-
-
-                # separate method add_readers?
-                uvpaths={}
-                mldpaths={}
-                windpaths = {}
-                
-                #for idx in range(start_time.year, end_time.year+1):
-                for idx, d in enumerate(dates):
-                    date = d.replace('-', '')
-                    uvpaths[idx] = str(bridge_dir / f'BS*{date}*UV.nc')
-                    mldpaths[idx] = str(bridge_dir / f'BS*{date}*MLD.nc') 
-                
-                uv_path = list(uvpaths.values())
-                mld_path = list(mldpaths.values())
-                
-                for i in range(start_time.year, end_time.year+1):
-                    windpaths[i] = str(bridge_dir / f'era5_y{i}.nc')
-                
-                wind_path = list(windpaths.values())
-                bathy_path = str(bridge_dir / 'bs_bathymetry.nc')
-                
-            elif context == 'bs-cmems': # copernicus Black Sea data (remote connection)
-                ocean_id = "cmems_mod_blk_phy-cur_my_2.5km_P1D-m"
-                wind_id = "cmems_obs-wind_glo_phy_my_l4_P1M" # this is a global reanalysis product, so same in all contexts
-                mld_id = 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m'
-                bathy_id = 'cmems_mod_glo_phy_my_0.083deg_static' # this is a global reanalysis product, so same in all contexts
-                stokes_id = 'cmems_mod_blk_wav_my_2.5km_PT1H-i'
-
-            # maybe useful to print paths of readers i am using, so one knows which product is being used when they simply use a context. 
-            elif context == 'med-cmems': # copernicus Med Sea data (remote connection)
-                ocean_id = "med-cmcc-cur-rean-h"
-                #wind_id = "cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H"
-                wind_id = "cmems_obs-wind_glo_phy_my_l4_P1M" # this is a global reanalysis product, so same in all contexts
-                mld_id = 'med-cmcc-mld-rean-d'
-                bathy_id = 'cmems_mod_glo_phy_my_0.083deg_static' # this is a global reanalysis product, so same in all contexts
-
-            
-            else:
-                raise ValueError("Unsupported context. Please choose one of 'bridge-bs', 'bs-cmems' or 'med-cmems'.")
-
-            reader_ids = [ocean_id, wind_id]#, stokes_id] # list of copernicus product ids, including bathymetry and mld if simulation is 3D
-            if self.depth == True:
-                reader_ids.append(mld_id)
-                reader_ids.append(bathy_id)
-      
-
-            readers = [] # list of opendrift readers created from those copernicus products
-            end_datetime = datetime.strptime((end_time + timedelta(days=1)).date().strftime('%Y-%m-%d'), '%Y-%m-%d') # rounding up to the next day, so it works even when duration is given as a float (such as in SUA)
-            for path in reader_ids: 
-                data = copernicusmarine.open_dataset(dataset_id = path,
-                                                   start_datetime = start_time, 
-                                                   end_datetime = end_datetime) 
-                r = Reader(data)
-                readers.append(r)
-
-            print('adding readers...')
-            self.o.add_reader(readers)
-
-            ### what is this????
-            if context == 'bridge-bs':
-                for k,r in self.o.readers.items(): 
-                    r.always_valid = True                  
-            
+            readers = []
+            for var in self.context:
+                readers.append(Reader(dataset_id=self.context[var]))
+            print('adding readers...')            
+            self.o.add_reader(readers) # add all readers for that context.
 
             # separate method with opendrift where i set configs and do seeding and run
             # some OpenDrift configurations
-            self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            if beaching:
+                self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            else:
+                self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
             self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
             self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
             
@@ -677,7 +606,7 @@ class PMAR(object): # rename this? it's long and confusing
             # if simulation is 2D, simply seed particles over polygon
             else:
                 self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
-                                           origin_marker=self.origin_marker, radius=seeding_radius)
+                                           origin_marker=self.origin_marker, radius=seeding_radius) # 
             
             # run simulation and write to temporary file
             #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
@@ -772,19 +701,6 @@ class PMAR(object): # rename this? it's long and confusing
         
         print(f'Interpolating time on ds. New timestep = {new_timestep} hours...')
         return ds
-
-    def assign_weight(self, weight=1):
-        """
-        Add a weight variable to ds. If 
-        """
-        ds = self.get_ds
-
-        print(f'Adding weight variable to ds...')
-        w = np.ones_like(self.ds.lon)*weight # longitude is always going to be available as a variable, so taking it as reference for the shape
-        ds = ds.assign({'weight': (('trajectory', 'time'), w.data)}) 
-        
-        return ds
-
     
     def decay_rate(self, k):
         '''
@@ -800,6 +716,7 @@ class PMAR(object): # rename this? it's long and confusing
         return y
 
     # make into property?
+    # THIS IS THE WEAK LINK, BECAUSE WHEN THERE ARE DISCREPANCIES IN THE GRIDS, THE INTEGRAL DOES NOT MATCH
     def use_by_traj(self, use_path, res, r_bounds=None):
         '''
         Select value of use raster at the trajectories' starting positions. 
@@ -818,29 +735,89 @@ class PMAR(object): # rename this? it's long and confusing
         grid = self.polygon_grid(res, r_bounds=r_bounds)
         poly_bounds = grid.total_bounds
         
-        _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # what was fillna for?
+        _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
 
         # create reference grid
         # we already have a function that creates a grid called polygon grid?
-        _gr = xr.DataArray(np.zeros((len(self._x_c), len(self._y_c))), coords={'x': self._x_c, 'y': self._y_c})
+        # _gr = xr.DataArray(np.zeros((len(self._x_c), len(self._y_c))), coords={'x': self._x_c, 'y': self._y_c})
 
-        gr = (
-            xr.DataArray(_gr) # need to transpose it because xhistogram does that for some reason
-            .rio.write_nodata(np.nan)
-            .rio.write_crs('epsg:4326')
-            .rio.write_coordinate_system())
+        # gr = (
+        #     xr.DataArray(_gr) # need to transpose it because xhistogram does that for some reason
+        #     .rio.write_nodata(np.nan)
+        #     .rio.write_crs('epsg:4326')
+        #     .rio.write_coordinate_system())
 
+        gr = self.raster_grid(res=res, r_bounds=r_bounds)
+        
         use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
-
+        use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+        
         # NB: there is a bug in the rasterhd2raster function (no conservation)
         # so the sum of my raster won't match the sum of the use raster (but it will match the sum of the resampled one)
         # questo use weight in realtà è solo il valore dell'uso nella posizione iniziale di ogni traiettoria. forse si potrebbe chiamare in un altro modo
-        use_value = _use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')#, tolerance=self.res*2) ### TODO capire bene tolerance. with the new resampling method, could do tolerance=res/2?
+        use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')#, tolerance=self.res*2) ### TODO capire bene tolerance. with the new resampling method, could do tolerance=res/2?
         
         print(f'number of trajectories with use value = 0 {use_value.where(use_value==0).count().data}')
         print(f'number of trajectories with use value != 0 {use_value.where(use_value!=0).count().data}')
         
         return use_value 
+
+    def assign_weight(self, weight=1):
+        """
+        Add a weight variable to ds. If 
+        """
+        # TODO. would be great if this function was able to handle numbers, arrays, 
+        # but also paths to files, either shapefiles or rasters, to produce the weight variable. 
+        
+        ds = self.get_ds
+
+        print(f'Adding weight variable to ds...')
+        w = np.ones_like(self.ds.lon)*weight # longitude is always going to be available as a variable, so taking it as reference for the shape
+        ds = ds.assign({'weight': (('trajectory', 'time'), w.data)}) 
+        
+        return ds
+
+    def normalize_weight(self, weight, res, r_bounds=None):
+        # dividing each trajectory weight by the number of particles that were in the same bin at t0
+        self.ds = self.get_bin_n(res=res, t=0, r_bounds=r_bounds)
+        #weight_by_bin = self.ds.weight.groupby(self.ds.isel(time=0).bin_n_t0)
+        print('weight_by_bin...')
+        weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0)
+        print('done.')
+        counts_per_bin = self.ds.isel(time=0).bin_n_t0.groupby(self.ds.isel(time=0).bin_n_t0).count()
+        print('counts_per_bin...')
+        #self.ds = self.assign_weight(weight_by_bin/counts_per_bin) # assign new weight, where original weight is divided by the number of particles in each bin at t0
+        normalized_weight = weight_by_bin/counts_per_bin # could i be dividing by 0 here at any point???
+        print('done.')
+        return normalized_weight
+
+    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, decay_coef=0, normalize=False, assign=False):
+        
+        if use_path is not None:
+            # extract value of use at starting position of each trajectory
+            use_value = self.use_by_traj(use_path=use_path, res=res, r_bounds=r_bounds)
+            weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
+
+        if decay_coef != 0:
+        # decay rate. default is no decay, but this is still useful to give weight the correct shape
+            print(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
+            y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
+            weight = weight*y
+
+        # broadcasting to correct shape
+        weight = xr.DataArray(weight).broadcast_like(self.ds.lon)
+        
+        if normalize is True:
+            weight = self.normalize_weight(weight, res=res, r_bounds=r_bounds)
+            print('weight normalized by number of particles in bin at t0.')
+
+        # ASSIGN needs to be LAST, otherwise i would be assigning the wrong weight
+        if assign is True:
+            self.ds = self.assign_weight(weight)
+
+        return weight
+    
+
 
     def get_bin_n(self, res, t=0, r_bounds=None):
         '''
@@ -855,19 +832,27 @@ class PMAR(object): # rename this? it's long and confusing
         grid = self.polygon_grid(res, r_bounds=r_bounds)
         ds = self.get_ds
         # calculate bin number of each trajectory at time 0, assign it to variable bin_n_t0
-        _bins = np.zeros((grid.shape)) 
+        _bins = np.zeros((len(grid),2)) 
         #print(_bins.shape)
         _bins[:,0] = np.array(grid.centroid.x) 
         _bins[:,1] = np.array(grid.centroid.y)  
-        print(f'calculating bin number at timestep {t}')
         func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
         #print('bin_n ufunc')
-        ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
-
+        try:
+            print(f'calculating bin number at timestep {t}')
+            ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
+            print('bin_n_t0 done.')
+        except:
+            logger.warning(f'Calculating bin_n at all timesteps {t}.')
+            ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
+            
         return ds
 
-    def get_histogram(self, res, r_bounds=None, weighted=False):
+    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=False, dim=['trajectory', 'time'], block_size='auto', use_path=None, decay_coef=0):
         '''
+        "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
+        from Stanev et al., 2019
+        
         res : float
             cell size, aka desired resolution of output map
         weighted : bool, optional
@@ -876,20 +861,103 @@ class PMAR(object): # rename this? it's long and confusing
         ----------
         
         '''
+
+        if self.reps > 1:
+            logger.warning(f'this run contains {self.reps} reps. to get histogram of aggregated reps, use .run() method. get_histogram() will only work on the last rep.')
+
         self.polygon_grid(res, r_bounds=r_bounds)
         xbin = self._x_e
         ybin = self._y_e
-        
-        if weighted:
-            print('calculating weighted histogram...')
-            h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], weights=self.ds.weight, block_size='auto')
-        else:
-            print('no weight variable detected, calculating unweighted histogram...')
-            h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=['trajectory', 'time'], block_size='auto')
 
-        h = h.transpose() # important to not have it where(h>0) otherwise it misses values when summing
+        weights = self.set_weights(res=res, r_bounds=r_bounds, weight=weight, normalize=normalize, use_path=use_path, decay_coef=decay_coef, assign=assign)
+        print('set_weights done.')
+        
+        #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
+        h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=dim, weights=weights.fillna(0.), block_size=block_size) 
+        # block_size='auto' was giving division by 0 error, which is a known bug: https://github.com/xgcm/xhistogram/issues/16
+        #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
+            
+        h = h.transpose().rename({'lon_bin':'x', 'lat_bin':'y'}) # important to not have it where(h>0) otherwise it misses values when summing
         
         return h
+
+
+    # # deprecated:
+    # def residence_time(self, res, r_bounds=None):#, r_bounds, status, tinterp):
+    #     '''
+    #     Estimates the residence time per cell (in hours) by multiplying the count of trajectories in a cell by the timestep of the run. 
+
+    #     Parameters
+    #     ----------
+    #     res : float
+    #         cell size, aka desired resolution of output map
+    #     '''
+    #     # for residence time, the weight is simply the timestep in hours 
+    #     t = datetime.strptime(self.get_ds.time_step_output, '%H:%M:%S')
+    #     td = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+    #     w = td.seconds/60/60 # this is the most flexible approach and works when tstep is < 1 houra
+    #     weights = self.set_weights(res=res, r_bounds=r_bounds, weight=w, assign=True, normalize=False)
+    #     print('######## WEIGHT RES TIME', weights)
+        
+    #     rt = self.get_histogram(res, r_bounds=r_bounds, weight=weights, block_size=len(self.ds.time))#, normalize=False)  
+    #     #rt.plot()
+    #     return rt
+
+    # deprecated:    
+    def concentration(self, use_path, res, r_bounds=None, decay_coef=0, normalize=True): 
+        '''
+        Calculates concentration of pressure per grid-cell at any given time, based on given raster of use density. 
+        Concentration is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
+        To ensure conservation over time, the weight at each timestep is equal to value_of_use/number_of_timesteps/number_of_trajectories_starting_from_that_cell. 
+
+        Parameters
+        ----------
+        use_path : str
+            Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
+        '''
+        
+        weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
+        
+        r = self.get_histogram(res=res, r_bounds=r_bounds, weight=weights, normalize=False, block_size=len(self.ds.time)).assign_attrs({'use_path': use_path})
+
+        return r
+
+
+    # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
+    # HOWEVER, this method fails if a trajectory goes back to same cell after a period of time. 
+    # so it is not exactly a distinct. 
+    def _traj_per_bin(self, res, r_bounds=None, use_path=None):#, weighted=False):
+        counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
+        
+        if use_path is not None:
+            weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, normalize=False, assign=True)
+
+        # this way, it will take the weight 
+        try:
+            h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'], block_size=len(self.ds.trajectory)) 
+        except:
+            h = self.get_histogram(res, dim=['time'], block_size=len(self.ds.trajectory)) 
+            logger.warning('No weight variable was found. Calculating unweighted histogram.')
+            #h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'])
+        
+        tpb = h/counts_per_cell
+
+
+        
+        #if weighted is True: 
+         #   tpb = h/counts_per_cell
+        #else:
+          #  tpb = counts_per_cell/counts_per_cell
+
+        return tpb.fillna(0.).sum('trajectory')
+
+    def traj_density(self, res, r_bounds=None): # similar to emodnet route density
+        w = self.set_weights(1)
+        self.ds = self.get_bin_n(res=res, t='all')
+        w_distinct = xr.apply_ufunc(traj_distinct, self.ds.bin_n.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), w.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), input_core_dims = [['time'],['time']], output_core_dims = [['time']], vectorize=True, dask='parallelized')
+        h_distinct = self.get_histogram(res=res, r_bounds=r_bounds, weight=w_distinct, block_size='auto')
+        return h_distinct
+
 
     def write_tiff(self, h, crs=4326, path=None, description=None, output_dir=None):# instead of use label, could do 'assign_attrs' for any attributes, including use_label, i might want to add
         '''
@@ -915,63 +983,15 @@ class PMAR(object): # rename this? it's long and confusing
             path = str(path).replace('.tif', f'_use-{description}.tif')
             #path = str(path).replace('.tif', f'_use-{description}.nc') # FOR DEBUGGING
 
+        print(path)
         r.rio.to_raster(path, nodata=0) 
         #h.to_netcdf(path)
         
         print(f'Wrote tiff to {path}.')
         pass
+    
 
-    def residence_time(self, res, r_bounds):#, r_bounds, status, tinterp):
-        '''
-        Estimates the residence time per cell (in hours) by multiplying the count of trajectories in a cell by the timestep of the run. 
-
-        Parameters
-        ----------
-        res : float
-            cell size, aka desired resolution of output map
-        '''
-        # for residence time, the weight is simply the timestep in hours 
-        w = datetime.strptime(self.get_ds.time_step_output, '%H:%M:%S').hour
-        
-        self.ds = self.assign_weight(weight=w)
-        # could add attributes to the variable explaining what the weight is in each case
-        
-        return self.get_histogram(res, r_bounds=r_bounds, weighted=True)  
-
-        
-    def concentration(self, use_path, res, r_bounds=None, decay_coef=0):
-        '''
-        Calculates concentration of pressure per grid-cell at any given time, based on given raster of use density. 
-        Concentration is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
-        To ensure conservation over time, the weight at each timestep is equal to value_of_use/number_of_timesteps/number_of_trajectories_starting_from_that_cell. 
-
-        Parameters
-        ----------
-        use_path : str
-            Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
-        '''
-        self.get_ds
-
-        # extract value of use at starting position of each trajectory
-        use_value = self.use_by_traj(use_path=use_path, res=res, r_bounds=r_bounds)
-        self.ds = self.get_bin_n(res=res, t=0, r_bounds=r_bounds)
-        weight_by_bin = use_value.groupby(self.ds.isel(time=0).bin_n_t0)
-        counts_per_bin = self.ds.isel(time=0).bin_n_t0.groupby(self.ds.isel(time=0).bin_n_t0).count()
-        w = weight_by_bin/counts_per_bin/len(self.ds.time) # here, i am dividing weight by the number of particles in each cell at starting pos
-
-        # decay rate. default is no decay, but this is still useful to give weight the correct shape
-        print(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
-        y = self.decay_rate(k=decay_coef)
-        weight = w*y
-        
-        self.ds = self.assign_weight(weight)
-
-        r = self.get_histogram(res, r_bounds=r_bounds, weighted=True).assign_attrs({'use_path': use_path})#.rename({'histogram_lon_lat': 'r0'})
-
-        return r
-        
-
-    def single_run(self, pnum, start_time, duration, res, r_bounds=None, decay_coef=0, use_path=None, use_label=None, output_dir=None):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=4), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
         '''
         Wrapper ? method computing trajectories and producing raster maps of residence time and (if required) concentration.
         
@@ -990,43 +1010,101 @@ class PMAR(object): # rename this? it's long and confusing
         decay_coef : float, optional
             Coefficient k of exponential decay function. Default is 0 (no decay)
         output_dir : dict, optional
-        
+
         '''
-        self.rt_cache = PMARCache(Path(self.basedir) / 'residence-time')
-        
-        rt_path, rt_exists = self.rt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        print(f'##################### rt_exists = {rt_exists}')
-        print(f'##################### rt_path = {rt_path}')
-        self.calculate_trajectories(start_time=start_time, pnum=pnum, duration_days=duration)
+        self.res = res
+        #self.cache = PMARCache(Path(self.basedir) / 'ppi')
+        # self.td_cache = PMARCache(Path(self.basedir) / 'traj-density')
+        # self.dt_cache = PMARCache(Path(self.basedir) / 'density-trend')
 
-        try:
-            rt_output_dir = output_dir['temp_rt_output']
-            c_output_dir = output_dir['temp_c_output']
-        except:
-            rt_output_dir = c_output_dir = None
-            
-        if rt_exists == True:
-            self.rt = rxr.open_rasterio(rt_path)
-        else:
-            self.rt = self.residence_time(res=res, r_bounds=r_bounds)
-            self.write_tiff(self.rt, path=rt_path, output_dir=rt_output_dir)
-            
-        if use_path:
-            self.c_cache = PMARCache(Path(self.basedir) / f'concentration-{use_label}')
-    
-            c_path, c_exists = self.c_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-            print(f'##################### c_exists = {c_exists}')
-            print(f'##################### c_path = {c_path}')
+        #if output_dir is not None:
+         #   self.cache = PMARCache(output_dir['temp_ppi_output'])
+            # self.dt_cache = PMARCache(output_dir['temp_dt_output'])
+            # self.rt_cache = PMARCache(output_dir['temp_rt_output'])
 
-            if c_exists == True:
-                self.c = rxr.open_rasterio(c_path)
-            else:
-                self.c = self.concentration(use_path=use_path, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
-                
-                self.write_tiff(self.c, path=c_path, output_dir=c_output_dir) # this will have to be use label
-        else:
-            print('No use_path provided. Returning residence time only.')
+        # this method runs its own cache 
+        self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, loglevel=loglevel)
         
+        # dt_path, dt_exists = self.dt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        # print(f'##################### dt_exists = {dt_exists}')
+        # print(f'##################### dt_path = {dt_path}')
+        
+        # td_path, td_exists = self.td_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        # print(f'##################### td_exists = {td_exists}')
+        # print(f'##################### td_path = {td_path}')
+
+
+        
+        # these are temporary directories for the rep tifs. 
+        # it is only used in .run()
+        #try:
+         #   rt_output_dir = output_dir['temp_rt_output']
+          #  c_output_dir = output_dir['temp_c_output']
+           # print('TEMP OUTPUT DIRS WORKED')
+        #except:
+         #   print('TEMP OUTPUT DIRS DIDNT WORK')
+          #  rt_output_dir = c_output_dir = output_dir
+
+        # _output_paths = list([dt_path, td_path]) 
+
+        # # create dataset where all outputs will be stored
+        self.output = xr.Dataset()
+        
+        # ## OUTPUT #1: dt is the Density Trend as defined in Stanev et al., 2019
+        # if make_dt == True:
+        #     if dt_exists == True:
+        #         self.output['dt'] = rxr.open_rasterio(dt_path).isel(band=0)
+        #     else:
+        #         self.output['dt'] = self.get_histogram(res=res, r_bounds=r_bounds, normalize=True, block_size=len(self.ds.time))
+
+        # ## OUTPUT #2: td is a "trajectory density", similar to the route density in EMODnet ()
+        # if make_td == True: 
+        #     if td_exists == True:
+        #         self.output['td'] = rxr.open_rasterio(td_path).isel(band=0)
+        #     else:
+        #         self.output['td'] = self.traj_density(res=res, r_bounds=r_bounds)
+
+        
+        ## OUTPUT #3: c is the concentration when particles are released from a given source (use_path)
+        #if use_path is not None:
+            # cache
+        self.c_cache = PMARCache(Path(self.basedir) / f'concentration-{use_label}')
+        if output_dir is not None:
+            self.c_cache = PMARCache(output_dir['temp_c_output'])
+        c_path, c_exists = self.c_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        print(f'##################### c_exists = {c_exists}')
+        print(f'##################### c_path = {c_path}')
+        # calculate concentration
+#        _output_paths.append(c_path)
+        #_output_dirs.append(c_output_dir)
+        if c_exists == True:
+            self.output['c'] = rxr.open_rasterio(c_path).isel(band=0)
+        else:
+            c = self.concentration(use_path=use_path, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
+            #plt.figure()
+            #c.where(c>0).plot()
+            self.output['c'] = c.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
+            #plt.figure()
+            #self.output.c.where(self.output.c>0).plot()
+            self.write_tiff(c, path=c_path)
+
+        # NB THIS LOOP ONLY WORKS IF I HAVE ALL 3 OUTPUT VARIABLES, OTHERWISE IT SAVES THEM TO THE WRONG DIRECTORY (e.g. c to density-trend)
+        #if save_tiffs == True:
+         #   print('WRITING TIFS..')
+          #  output_paths = dict(zip(list(self.output.data_vars), _output_paths))
+           # print('output_paths', output_paths)
+           # print('output_vars', self.output.data_vars)
+
+            #if output_dir is None:
+             #   print('output_dir is None')
+              #  for var in self.output.data_vars: 
+               #     self.write_tiff(self.output[str(var)], path=output_paths[str(var)])#, output_dir=output_dir[f'temp_{var}_output'])
+            #else:
+             #   print('output_dir is not None')
+              #  for var in self.output.data_vars: 
+               #     self.write_tiff(self.output[str(var)], path=output_paths[str(var)], output_dir=output_dir[f'temp_{var}_output'])
+        return self.output
+
     
     def sum_reps(self, rep_path):
         '''
@@ -1037,19 +1115,22 @@ class PMAR(object): # rename this? it's long and confusing
         rep_path : list
             list of paths to each rep 
         '''
-        for idx, rep in enumerate(rep_path):
-            if idx == 0:
-                r1 = r0 = rxr.open_rasterio(rep) # should be open rasterio 
-            else:
-                r0 = r1
-                r1 = r0 + rxr.open_rasterio(rep)
+        if self.reps == 1:
+            r1 = rxr.open_rasterio(rep_path)
+        else:
+            for idx, rep in enumerate(rep_path):
+                if idx == 0:
+                    r1 = r0 = rxr.open_rasterio(rep) 
+                else:
+                    r0 = r1
+                    r1 = r0 + rxr.open_rasterio(rep)
 
             #fig, ax = plt.subplots()
             #r1.histogram_lon_lat.where(r1.histogram_lon_lat>0).plot(ax=ax)
         
         return r1
     
-    def run(self, ptot, reps, tshift, duration=30, start_time='2019-01-01', res=0.04, r_bounds=None, use_path=None, use_label=None, decay_coef=0):
+    def run(self, ptot, reps, tshift, duration=30, start_time='2019-01-01', tstep=timedelta(hours=4), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
         '''
         Wrapper ? method computing trajectories and producing residence time and concentration raster over required number of reps. 
     
@@ -1076,62 +1157,103 @@ class PMAR(object): # rename this? it's long and confusing
         decay_coef : float, optional
         
         '''
-        self.rt_cache = PMARCache(Path(self.basedir) / 'residence-time')
-        self.c_cache = PMARCache(Path(self.basedir) / f'concentration-{use_label}')
 
+        # THIS IS ONLY USEFUL FOR SUA
+        #if temp_dirs is True:
+         #   dt_output_dir = tempfile.TemporaryDirectory(dir=self.dt_cache.cachedir).name
+          #  rt_output_dir = tempfile.TemporaryDirectory(dir=self.rt_cache.cachedir).name
+          #  c_output_dir = tempfile.TemporaryDirectory(dir=self.c_cache.cachedir).name
 
-        rt_path, rt_exists = self.rt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+#        dt_output_dir = Path(self.basedir) / 'density-trend'
+#        rt_output_dir = Path(self.basedir) / 'residence-time'
+#        td_output_dir = Path(self.basedir) / 'traj-density'
+        c_output_dir = Path(self.basedir) / f'concentration-{use_label}'
+
+        self.cache = PMARCache(output_dir)        
+        # self.dt_cache = PMARCache(dt_output_dir)
+        # #self.rt_cache = PMARCache(rt_output_dir)
+        # self.td_cache = PMARCache(td_output_dir)
+        # self.c_cache = PMARCache(c_output_dir)
+        
+        # dt_path, dt_exists = self.dt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        # #rt_path, rt_exists = self.rt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        # td_path, td_exists = self.td_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)        
         c_path, c_exists = self.c_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
-        temp_rt_output_dir = tempfile.TemporaryDirectory(dir=self.rt_cache.cachedir)
-        temp_c_output_dir = tempfile.TemporaryDirectory(dir=self.c_cache.cachedir)
+        self.output = xr.Dataset()
+        
+        # if dt_exists == True:
+        #     print('raster dt file with these configurations already exists. see self.output')
+        #     self.output['dt'] = rxr.open_rasterio(dt_path)
 
-        if rt_exists == True:
-            print('raster rt file with these configurations already exists')
-            rt = rxr.open_rasterio(rt_path)
-            #c = rxr.open_rasterio(rep_c_path)
+        # if td_exists == True:
+        #     print('raster td file with these configurations already exists. see self.output')
+        #     self.output['td'] = rxr.open_rasterio(td_path)
         
         if c_exists == True:
-            print('raster c file with these configurations already exists')
-            c = rxr.open_rasterio(c_path)
-            
-        if rt_exists == False or c_exists == False:
-            for n in range(0, reps):
-                #print(f'Starting rep #{n+1}...')
-                start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
-                rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
-                
-                logger.warning(f'Starting rep #{n} with start_time = {rep_start_time}')
-                
-                rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
-                # this will have to go as an attribute in ds too, useful for plotting
-                
-                pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
-                
-                self.single_run(pnum=pnum, duration=duration, start_time=rep_start_time, res=res, r_bounds=r_bounds, use_path=use_path, use_label=use_label, decay_coef=decay_coef, output_dir = {'temp_rt_output': temp_rt_output_dir.name, 'temp_c_output': temp_c_output_dir.name})
-                logger.warning(f'Done with rep #{n}.')
+            print('raster c file with these configurations already exists. see self.output')
+            self.output['c'] = rxr.open_rasterio(c_path)
 
-            # the below could be improved...
-            rep_rt_path = glob.glob(f'{temp_rt_output_dir.name}/*.tif')
-            print(f'############################## rep_rt_path = {rep_rt_path}')
-            rep_c_path = glob.glob(f'{temp_c_output_dir.name}/*.tif')
-            print(f'############################## rep_c_path = {rep_c_path}')
-    
-            ### FOR DEBUGGING
-            #rep_rt_path = glob.glob(f'{temp_output_dir.name}/*RES-TIME*.nc')
-            #rep_c_path = glob.glob(f'{temp_output_dir.name}/*{use_label}*.nc')
-            #### 
-            rt = self.sum_reps(rep_rt_path)
-            self.write_tiff(rt, path=rt_path)
-            
-            c = self.sum_reps(rep_c_path)
-            self.write_tiff(c, path=c_path)
-            print('DONE.')
+        
 
-        return rt, c
+        #if dt_exists + td_exists + c_exists < 3: # i.e. if at least one does not exist. but this could be better controlled by switching on/off the actual outputs one wants.
+        if use_path is None: #and dt_exists + td_exists == 2: # if there is no use_path, only need dt and rt. if they already exist, pass
+            # make a use layer by assigning value 1 to each cell in the grid
+            self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster("unity-use.tif") # unity weight use grid
+            self.use_path = "unity-use.tif"
+    #else: 
+        for n in range(0, reps):
+            #print(f'Starting rep #{n+1}...')
+            start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
+            rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
+            
+            logger.warning(f'Starting rep #{n} with start_time = {rep_start_time}')
+            
+            rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
+            # this will have to go as an attribute in ds too, useful for plotting
+            
+            pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
+            
+            self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+            logger.warning(f'Done with rep #{n}.')
+
+        # # the below could be improved...
+        # rep_dt_path = glob.glob(f'{dt_output_dir}/*.tif')
+        # rep_td_path = glob.glob(f'{td_output_dir}/*.tif')
+        # print(f'############################## rep_td_path = {rep_td_path}')
+
+        # #### output datasets
+        # # density trend
+        # if make_dt == True:
+        #     self.output['dt'] = dt = self.sum_reps(rep_dt_path)
+        #     self.write_tiff(dt, path=dt_path)
+        
+        # # traj density
+        # if make_td == True:
+        #     self.output['td'] = td = self.sum_reps(rep_td_path)
+        #     self.write_tiff(td, path=td_path)                
+
+
+        # thumbnails
+#               thumb_rt_path = str(rt_path).split('.tif')[0]+'.png'
+#                self.plot(rt, title='residence time', savepng=thumb_rt_path)
+
+        # concentration
+        #if use_path:
+        rep_c_path = glob.glob(f'{c_output_dir}/*.tif')
+        print(f'############################## rep_c_path = {rep_c_path}')
+        self.output['c'] = c = self.sum_reps(rep_c_path)
+        self.write_tiff(c, path=c_path)
+        thumb_c_path = str(c_path).split('.tif')[0]+'.png'
+        self.plot(c, title=use_label, savepng=thumb_c_path)
+        print('DONE.')
+        # else:
+        #     print('No use_path provided. Returning residence time only.')
+
+        pass
         
     
-    def plot(self, r=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, title=None, save_fig='thumbnail'):
+    def plot(self, raster, title=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=cartopy.crs.epsg(3857), transform=cartopy.crs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, savepng=None):
         """
         Plot particle_raster outputs.
         
@@ -1197,21 +1319,12 @@ class PMAR(object): # rename this? it's long and confusing
         MEDIUM_SIZE = 10
         BIGGER_SIZE = 16
         
-        if self.raster is None: 
-            raise ValueError("No raster has been calculated yet. Please launch particle_raster method first.")
-        
-        if r is None:
-            r = self.raster[list(self.raster.data_vars)[-1]]
-        
-        else:
-            pass
-        
         ### this is actually creating problems in plots, commenting for now
         # drop nan values to have cleaner thumbnails
         #lon_var = [varname for varname in r.coords if "lon" in varname][0] # find name of lon variable
         #lat_var = [varname for varname in r.coords if "lat" in varname][0] # find name of lat variable
 
-        r = r.where(r>0)
+        r = raster.where(raster>0)
         #r = r.dropna(str(lon_var), 'all').dropna(str(lat_var), 'all')
         
         fig = plt.figure(figsize=figsize)
@@ -1225,36 +1338,34 @@ class PMAR(object): # rename this? it's long and confusing
         gl.top_labels = False
         gl.right_labels = False    
 
-        im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False)
-        cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
+        im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False, transform=transform)
+        #cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
+        cax = fig.add_axes([.92, 0.2, 0.02, 0.6])
         cbar = plt.colorbar(im, cax=cax, extend='max')
         cbar.set_label('uom from input layer', rotation=90)
 
-        if title is not None:
-            ax.set_title(title, fontsize=12)
-        else:
-            ax.set_title(f'use_label: {r.use_label}\n use_path: {r.use_path}', fontsize=8)
+        ax.set_title(title)
 
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
 
 
         plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
-        plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
+        plt.rc('axes', titlesize=MEDIUM_SIZE)     # fontsize of the axes title
         plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
         plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
         plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
         plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
         plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
 
-        if save_fig is not None:
+        if savepng is not None:
             #Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True) # useful for geoplatform to keep them in same dir as raster
-            plt.savefig(str(save_fig), dpi=160, bbox_inches='tight')
+            plt.savefig(str(savepng), dpi=160, bbox_inches='tight')
 
         return fig, ax
 
     
-    def scatter(self, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='rainbow', coastres='10m', proj=ccrs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, save_to=None):
+    def scatter(self, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='rainbow', coastres='10m', proj=cartopy.crs.epsg(3857), dpi=120, figsize=[10,7], rivers=False, save_to=None):
         """
         Visualise particle trajectories over time [days elapsed], defined by age_seconds. 
         
@@ -1326,7 +1437,7 @@ class PMAR(object): # rename this? it's long and confusing
         gl.top_labels = False
         gl.right_labels = False    
 
-        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha)
+        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha, transform=cartopy.crs.PlateCarree())
         cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
         cbar = plt.colorbar(im, cax=cax)
         cbar.set_label(cbar_label, rotation=90)
@@ -1360,11 +1471,3 @@ class PMAR(object): # rename this? it's long and confusing
 
 
     
-def check_particle_file(path_to_file):
-    ds = xr.open_dataset(path_to_file)
-    vars_to_check = ['x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind']
-    for i in vars_to_check:
-        if np.all(ds[i].load() == 0):
-            print(f'ATTENTION: all 0 values detected for variable {i}.')
-        else:
-            print(f'all good: variable {i} has non-zero values.')
