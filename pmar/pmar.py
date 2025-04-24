@@ -95,7 +95,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrc_path=None):
+    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
         """
         Parameters
         ---------- 
@@ -135,7 +135,7 @@ class PMAR(object):
         self.poly_path = poly_path 
         self.raster = None
         self.origin_marker = 0
-        self.netrc_path = netrc_path
+        #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
         self.depth = depth
@@ -205,33 +205,6 @@ class PMAR(object):
             if type(self.particle_path) is list: 
                 self.reps = len(particle_path)
                 
-                ###### THIS METHOD was taking reps from origin_marker, but does not work if origin marker is the same in all reps...
-                #_reps = np.zeros(len(self.particle_path))
-                #for idx, f in enumerate(self.particle_path):
-                 #   _reps[idx] = xr.open_dataset(f).origin_marker.maxval
-                    #print('#### origin marker', _reps[idx])
-
-                #self.reps = len(np.unique(_reps))
-                #self.reps = int(np.max(_reps))+1
-                #if len(_reps) != len(np.unique(_reps)):
-                #    logger.warning(f'Repetition of origin_marker value detected. Please specify number of reps.')
-
-            
-            #self.get_ds # this should not be automatic, sometimes it is too heavy and useless  
-            
-            # if a particle_path is given, meaning a run with those configs already exists, the poly_path contained in the file's attributes "wins" over poly_path
-            #if self.ds.poly_path is not None:
-             #   self.poly_path = str(self.ds.poly_path)            
-    
- #   def get_userinfo(self, machine):
-  #      try:
-   #         secrets = netrc.netrc(self.netrc_path)
-    #    except FileNotFoundError:
-     #       ''
-      #  auth = secrets.authenticators(machine)
-       # if auth is None:
-        #    return ''
-        #return f'{auth[0]}:{auth[2]}@'
 
 
     def get_marine_polygon(self, basin=None):
@@ -311,7 +284,7 @@ class PMAR(object):
         Make grid from polygon of domain area.
         '''
         
-        if res == self.res and self._polygon_grid is not None: # WRONG, i need to test if r_bounds matches too!
+        if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
             print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
         else:
             print(f'polygon_grid: calculating new polygon_grid with resolution = {res}.')
@@ -365,7 +338,7 @@ class PMAR(object):
     @property
     def get_ds(self):
         # this doesnt actually work with reps, because self.ds always exists, but then it is only the last rep.
-        # i should discriminate e.g. by comparing self.ptot with self.ds.trajectory.
+        # should discriminate e.g. by comparing self.ptot with self.ds.trajectory.
         # if they don't match, i am probably only looking at the last rep. 
         try:
             self.ds
@@ -382,10 +355,6 @@ class PMAR(object):
                 # if the run contained reps, ensure trajectories have unique IDs for convenience
                 logger.error(f'self.reps = {self.reps}')
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
-
-                # if there is a use_path and particle_paths, would be nice if there was a quick way to assign use weight
-                # new addition 6 nov 24
-                #ds = self.assign_weight(weight=1) # default is to assign weight = 1 everywhere
             
             self.ds = ds
             print('get_ds: done.')
@@ -398,7 +367,6 @@ class PMAR(object):
         '''
         Sometimes opendrift runs end early because e.g. all particles have beached, resulting in reps with different time lengths. This method finds the maximum time lenght of all reps.
         '''
-        #print([filename for filename in self.particle_path])
         lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_path])
         print(f'giving all datasets the same time length of {lens} tsteps...')
         return lens.max()
@@ -410,7 +378,6 @@ class PMAR(object):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
 
-    # doublecheck this. very old, maybe could be improved. 
     def make_poly(self, lon, lat, crs='4326', write=True):
         """
         Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile. 
@@ -468,7 +435,6 @@ class PMAR(object):
         else:
             return poly
     
-# [pnum, start_time, season, duration_days, s_bounds, z, tstep, hdiff, termvel, crs]
     def get_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=4), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, loglevel=40):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
@@ -555,9 +521,8 @@ class PMAR(object):
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
-            #self.o.io_import_file(str(q)) # this is sometimes too heavy
             ps = xr.open_mfdataset(file_path)
-            print(f'NOTE: Opendrift file with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant now with cachedir
+            print(f'NOTE: Opendrift file with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant with cachedir
 
         # otherwise, run requested simulation
         elif file_exists == False:
@@ -577,7 +542,6 @@ class PMAR(object):
             print('adding readers...')            
             self.o.add_reader(readers) # add all readers for that context.
 
-            # separate method with opendrift where i set configs and do seeding and run
             # some OpenDrift configurations
             if beaching:
                 self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
@@ -592,7 +556,7 @@ class PMAR(object):
 
             ##### SEEDING #####
             print('seeding particles...')
-            np.random.seed(None) # to avoid seeding in same exact position each time             
+            np.random.seed(None)            
 
             # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
             if self.depth == True:
@@ -624,13 +588,10 @@ class PMAR(object):
             elapsed = (T.time() - t_0)
             print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
 
-
-            #### CHECK HERE IF READERS WERE PROCESSED CORRECTLY #### # separate method?
             if hasattr(self.o, 'discarded_readers'):
                 logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
 
             #### A BIT OF POST-PROCESSING ####
-            # separate method 
             print('writing to netcdf...')
 
             _ps = xr.open_dataset(temp_outfile) # open temporary file
@@ -645,8 +606,6 @@ class PMAR(object):
                                   #'tseed': self.tseed.total_seconds(), 
                                   'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth),
                                   'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
-                                    #removing this attribute as i already have the check for discarded readers elsewhere. 
-                                    #This way I can compare attributes more easily for new caching method
 
 
             ps.to_netcdf(str(file_path))
@@ -715,8 +674,7 @@ class PMAR(object):
         y = np.exp(-k*(self.ds.time-self.ds.time.min()).astype(int)/60/60/1e9/24) #decay function
         return y
 
-    # make into property?
-    # THIS IS THE WEAK LINK, BECAUSE WHEN THERE ARE DISCREPANCIES IN THE GRIDS, THE INTEGRAL DOES NOT MATCH
+    # TODO: when there are discrepancies in the grids, the integral does not match 
     def use_by_traj(self, use_path, res, r_bounds=None):
         '''
         Select value of use raster at the trajectories' starting positions. 
@@ -737,25 +695,12 @@ class PMAR(object):
         
         _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
 
-        # create reference grid
-        # we already have a function that creates a grid called polygon grid?
-        # _gr = xr.DataArray(np.zeros((len(self._x_c), len(self._y_c))), coords={'x': self._x_c, 'y': self._y_c})
-
-        # gr = (
-        #     xr.DataArray(_gr) # need to transpose it because xhistogram does that for some reason
-        #     .rio.write_nodata(np.nan)
-        #     .rio.write_crs('epsg:4326')
-        #     .rio.write_coordinate_system())
-
         gr = self.raster_grid(res=res, r_bounds=r_bounds)
         
         use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
         use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
-        
-        # NB: there is a bug in the rasterhd2raster function (no conservation)
-        # so the sum of my raster won't match the sum of the use raster (but it will match the sum of the resampled one)
-        # questo use weight in realtà è solo il valore dell'uso nella posizione iniziale di ogni traiettoria. forse si potrebbe chiamare in un altro modo
-        use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')#, tolerance=self.res*2) ### TODO capire bene tolerance. with the new resampling method, could do tolerance=res/2?
+
+        use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
         
         print(f'number of trajectories with use value = 0 {use_value.where(use_value==0).count().data}')
         print(f'number of trajectories with use value != 0 {use_value.where(use_value!=0).count().data}')
@@ -766,8 +711,7 @@ class PMAR(object):
         """
         Add a weight variable to ds. If 
         """
-        # TODO. would be great if this function was able to handle numbers, arrays, 
-        # but also paths to files, either shapefiles or rasters, to produce the weight variable. 
+        # TODO. produce weight variable from floats, arrays, shapefiles, rasters
         
         ds = self.get_ds
 
@@ -780,14 +724,12 @@ class PMAR(object):
     def normalize_weight(self, weight, res, r_bounds=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
         self.ds = self.get_bin_n(res=res, t=0, r_bounds=r_bounds)
-        #weight_by_bin = self.ds.weight.groupby(self.ds.isel(time=0).bin_n_t0)
         print('weight_by_bin...')
         weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0)
         print('done.')
         counts_per_bin = self.ds.isel(time=0).bin_n_t0.groupby(self.ds.isel(time=0).bin_n_t0).count()
         print('counts_per_bin...')
-        #self.ds = self.assign_weight(weight_by_bin/counts_per_bin) # assign new weight, where original weight is divided by the number of particles in each bin at t0
-        normalized_weight = weight_by_bin/counts_per_bin # could i be dividing by 0 here at any point???
+        normalized_weight = weight_by_bin/counts_per_bin 
         print('done.')
         return normalized_weight
 
@@ -811,7 +753,7 @@ class PMAR(object):
             weight = self.normalize_weight(weight, res=res, r_bounds=r_bounds)
             print('weight normalized by number of particles in bin at t0.')
 
-        # ASSIGN needs to be LAST, otherwise i would be assigning the wrong weight
+        # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
         if assign is True:
             self.ds = self.assign_weight(weight)
 
@@ -882,32 +824,10 @@ class PMAR(object):
         return h
 
 
-    # # deprecated:
-    # def residence_time(self, res, r_bounds=None):#, r_bounds, status, tinterp):
-    #     '''
-    #     Estimates the residence time per cell (in hours) by multiplying the count of trajectories in a cell by the timestep of the run. 
-
-    #     Parameters
-    #     ----------
-    #     res : float
-    #         cell size, aka desired resolution of output map
-    #     '''
-    #     # for residence time, the weight is simply the timestep in hours 
-    #     t = datetime.strptime(self.get_ds.time_step_output, '%H:%M:%S')
-    #     td = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
-    #     w = td.seconds/60/60 # this is the most flexible approach and works when tstep is < 1 houra
-    #     weights = self.set_weights(res=res, r_bounds=r_bounds, weight=w, assign=True, normalize=False)
-    #     print('######## WEIGHT RES TIME', weights)
-        
-    #     rt = self.get_histogram(res, r_bounds=r_bounds, weight=weights, block_size=len(self.ds.time))#, normalize=False)  
-    #     #rt.plot()
-    #     return rt
-
-    # deprecated:    
-    def concentration(self, use_path, res, r_bounds=None, decay_coef=0, normalize=True): 
+    def ppi(self, use_path, res, r_bounds=None, decay_coef=0, normalize=True): 
         '''
-        Calculates concentration of pressure per grid-cell at any given time, based on given raster of use density. 
-        Concentration is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
+        Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
+        ppi is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
         To ensure conservation over time, the weight at each timestep is equal to value_of_use/number_of_timesteps/number_of_trajectories_starting_from_that_cell. 
 
         Parameters
@@ -915,6 +835,12 @@ class PMAR(object):
         use_path : str
             Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
         '''
+        if r_bounds is None:
+            r_bounds = self.extent # take whole basin
+            
+        if use_path is None:
+            self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
+            self.use_path = Path (self.basedir / 'unity-use.tif')
         
         weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
         
@@ -924,8 +850,8 @@ class PMAR(object):
 
 
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
-    # HOWEVER, this method fails if a trajectory goes back to same cell after a period of time. 
-    # so it is not exactly a distinct. 
+    # note that this method fails if a trajectory goes back to same cell after a period of time. 
+    
     def _traj_per_bin(self, res, r_bounds=None, use_path=None):#, weighted=False):
         counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
         
@@ -943,11 +869,6 @@ class PMAR(object):
         tpb = h/counts_per_cell
 
 
-        
-        #if weighted is True: 
-         #   tpb = h/counts_per_cell
-        #else:
-          #  tpb = counts_per_cell/counts_per_cell
 
         return tpb.fillna(0.).sum('trajectory')
 
@@ -991,13 +912,13 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=4), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=4), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label='unity-use', output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
         '''
-        Wrapper ? method computing trajectories and producing raster maps of residence time and (if required) concentration.
+        Compute trajectories and producing raster maps of ppi.
         
         Parameters
         ----------
-        pnum : int
+        pnum : intf
             Number of particles to seed, i.e. trajectories to calculate.
         start_time : string
             Start date of the run, in YYYY-MM-DD format.
@@ -1013,102 +934,36 @@ class PMAR(object):
 
         '''
         self.res = res
-        #self.cache = PMARCache(Path(self.basedir) / 'ppi')
-        # self.td_cache = PMARCache(Path(self.basedir) / 'traj-density')
-        # self.dt_cache = PMARCache(Path(self.basedir) / 'density-trend')
-
-        #if output_dir is not None:
-         #   self.cache = PMARCache(output_dir['temp_ppi_output'])
-            # self.dt_cache = PMARCache(output_dir['temp_dt_output'])
-            # self.rt_cache = PMARCache(output_dir['temp_rt_output'])
 
         # this method runs its own cache 
         self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, loglevel=loglevel)
-        
-        # dt_path, dt_exists = self.dt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        # print(f'##################### dt_exists = {dt_exists}')
-        # print(f'##################### dt_path = {dt_path}')
-        
-        # td_path, td_exists = self.td_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        # print(f'##################### td_exists = {td_exists}')
-        # print(f'##################### td_path = {td_path}')
-
-
-        
-        # these are temporary directories for the rep tifs. 
-        # it is only used in .run()
-        #try:
-         #   rt_output_dir = output_dir['temp_rt_output']
-          #  c_output_dir = output_dir['temp_c_output']
-           # print('TEMP OUTPUT DIRS WORKED')
-        #except:
-         #   print('TEMP OUTPUT DIRS DIDNT WORK')
-          #  rt_output_dir = c_output_dir = output_dir
-
-        # _output_paths = list([dt_path, td_path]) 
 
         # # create dataset where all outputs will be stored
         self.output = xr.Dataset()
         
-        # ## OUTPUT #1: dt is the Density Trend as defined in Stanev et al., 2019
-        # if make_dt == True:
-        #     if dt_exists == True:
-        #         self.output['dt'] = rxr.open_rasterio(dt_path).isel(band=0)
-        #     else:
-        #         self.output['dt'] = self.get_histogram(res=res, r_bounds=r_bounds, normalize=True, block_size=len(self.ds.time))
-
-        # ## OUTPUT #2: td is a "trajectory density", similar to the route density in EMODnet ()
-        # if make_td == True: 
-        #     if td_exists == True:
-        #         self.output['td'] = rxr.open_rasterio(td_path).isel(band=0)
-        #     else:
-        #         self.output['td'] = self.traj_density(res=res, r_bounds=r_bounds)
-
-        
-        ## OUTPUT #3: c is the concentration when particles are released from a given source (use_path)
-        #if use_path is not None:
-            # cache
-        self.c_cache = PMARCache(Path(self.basedir) / f'concentration-{use_label}')
+        self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         if output_dir is not None:
-            self.c_cache = PMARCache(output_dir['temp_c_output'])
-        c_path, c_exists = self.c_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        print(f'##################### c_exists = {c_exists}')
-        print(f'##################### c_path = {c_path}')
-        # calculate concentration
-#        _output_paths.append(c_path)
-        #_output_dirs.append(c_output_dir)
-        if c_exists == True:
-            self.output['c'] = rxr.open_rasterio(c_path).isel(band=0)
+            self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        print(f'##################### ppi_exists = {ppi_exists}')
+        print(f'##################### ppi_path = {ppi_path}')
+        # calculate ppi
+
+        if ppi_exists == True:
+            self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
         else:
-            c = self.concentration(use_path=use_path, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
-            #plt.figure()
-            #c.where(c>0).plot()
-            self.output['c'] = c.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
-            #plt.figure()
-            #self.output.c.where(self.output.c>0).plot()
-            self.write_tiff(c, path=c_path)
+            ppi = self.ppi(use_path=use_path, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
 
-        # NB THIS LOOP ONLY WORKS IF I HAVE ALL 3 OUTPUT VARIABLES, OTHERWISE IT SAVES THEM TO THE WRONG DIRECTORY (e.g. c to density-trend)
-        #if save_tiffs == True:
-         #   print('WRITING TIFS..')
-          #  output_paths = dict(zip(list(self.output.data_vars), _output_paths))
-           # print('output_paths', output_paths)
-           # print('output_vars', self.output.data_vars)
+            self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
 
-            #if output_dir is None:
-             #   print('output_dir is None')
-              #  for var in self.output.data_vars: 
-               #     self.write_tiff(self.output[str(var)], path=output_paths[str(var)])#, output_dir=output_dir[f'temp_{var}_output'])
-            #else:
-             #   print('output_dir is not None')
-              #  for var in self.output.data_vars: 
-               #     self.write_tiff(self.output[str(var)], path=output_paths[str(var)], output_dir=output_dir[f'temp_{var}_output'])
+            self.write_tiff(ppi, path=ppi_path)
+
         return self.output
 
     
     def sum_reps(self, rep_path):
         '''
-        Sum concentration rasters of single reps, return summed raster. 
+        Sum ppi rasters of single reps, return summed raster. 
     
         Parameters 
         ----------
@@ -1124,15 +979,12 @@ class PMAR(object):
                 else:
                     r0 = r1
                     r1 = r0 + rxr.open_rasterio(rep)
-
-            #fig, ax = plt.subplots()
-            #r1.histogram_lon_lat.where(r1.histogram_lon_lat>0).plot(ax=ax)
         
         return r1
     
-    def run(self, ptot, reps, tshift, duration=30, start_time='2019-01-01', tstep=timedelta(hours=4), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
+    def run(self, ptot, reps, tshift, duration=30, start_time='2019-01-01', tstep=timedelta(hours=4), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label='unity-use', hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
         '''
-        Wrapper ? method computing trajectories and producing residence time and concentration raster over required number of reps. 
+        Compute trajectories and produce ppi raster over required number of reps. 
     
         Parameters
         ----------
@@ -1158,50 +1010,18 @@ class PMAR(object):
         
         '''
 
-        # THIS IS ONLY USEFUL FOR SUA
-        #if temp_dirs is True:
-         #   dt_output_dir = tempfile.TemporaryDirectory(dir=self.dt_cache.cachedir).name
-          #  rt_output_dir = tempfile.TemporaryDirectory(dir=self.rt_cache.cachedir).name
-          #  c_output_dir = tempfile.TemporaryDirectory(dir=self.c_cache.cachedir).name
+        ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
 
-#        dt_output_dir = Path(self.basedir) / 'density-trend'
-#        rt_output_dir = Path(self.basedir) / 'residence-time'
-#        td_output_dir = Path(self.basedir) / 'traj-density'
-        c_output_dir = Path(self.basedir) / f'concentration-{use_label}'
-
-        self.cache = PMARCache(output_dir)        
-        # self.dt_cache = PMARCache(dt_output_dir)
-        # #self.rt_cache = PMARCache(rt_output_dir)
-        # self.td_cache = PMARCache(td_output_dir)
-        # self.c_cache = PMARCache(c_output_dir)
-        
-        # dt_path, dt_exists = self.dt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        # #rt_path, rt_exists = self.rt_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        # td_path, td_exists = self.td_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, decay_coef=decay_coef, r_bounds=r_bounds, use_path=None, use_label=None)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)        
-        c_path, c_exists = self.c_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        self.ppi_cache = PMARCache(ppi_output_dir)
+             
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         self.output = xr.Dataset()
         
-        # if dt_exists == True:
-        #     print('raster dt file with these configurations already exists. see self.output')
-        #     self.output['dt'] = rxr.open_rasterio(dt_path)
+        if ppi_exists == True:
+            print('raster ppi file with these configurations already exists. see self.output')
+            self.output['ppi'] = rxr.open_rasterio(ppi_path)
 
-        # if td_exists == True:
-        #     print('raster td file with these configurations already exists. see self.output')
-        #     self.output['td'] = rxr.open_rasterio(td_path)
-        
-        if c_exists == True:
-            print('raster c file with these configurations already exists. see self.output')
-            self.output['c'] = rxr.open_rasterio(c_path)
-
-        
-
-        #if dt_exists + td_exists + c_exists < 3: # i.e. if at least one does not exist. but this could be better controlled by switching on/off the actual outputs one wants.
-        if use_path is None: #and dt_exists + td_exists == 2: # if there is no use_path, only need dt and rt. if they already exist, pass
-            # make a use layer by assigning value 1 to each cell in the grid
-            self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster("unity-use.tif") # unity weight use grid
-            self.use_path = "unity-use.tif"
-    #else: 
         for n in range(0, reps):
             #print(f'Starting rep #{n+1}...')
             start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
@@ -1217,35 +1037,15 @@ class PMAR(object):
             self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
             logger.warning(f'Done with rep #{n}.')
 
-        # # the below could be improved...
-        # rep_dt_path = glob.glob(f'{dt_output_dir}/*.tif')
-        # rep_td_path = glob.glob(f'{td_output_dir}/*.tif')
-        # print(f'############################## rep_td_path = {rep_td_path}')
-
-        # #### output datasets
-        # # density trend
-        # if make_dt == True:
-        #     self.output['dt'] = dt = self.sum_reps(rep_dt_path)
-        #     self.write_tiff(dt, path=dt_path)
-        
-        # # traj density
-        # if make_td == True:
-        #     self.output['td'] = td = self.sum_reps(rep_td_path)
-        #     self.write_tiff(td, path=td_path)                
-
-
-        # thumbnails
-#               thumb_rt_path = str(rt_path).split('.tif')[0]+'.png'
-#                self.plot(rt, title='residence time', savepng=thumb_rt_path)
-
-        # concentration
         #if use_path:
-        rep_c_path = glob.glob(f'{c_output_dir}/*.tif')
-        print(f'############################## rep_c_path = {rep_c_path}')
-        self.output['c'] = c = self.sum_reps(rep_c_path)
-        self.write_tiff(c, path=c_path)
-        thumb_c_path = str(c_path).split('.tif')[0]+'.png'
-        self.plot(c, title=use_label, savepng=thumb_c_path)
+        if reps>1:
+            rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif')
+            print(f'############################## rep_ppi_path = {rep_ppi_path}')
+            self.output['ppi'] = ppi = self.sum_reps(rep_ppi_path)
+        
+        self.write_tiff(self.output['ppi'], path=ppi_path)
+        thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
+        self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
         print('DONE.')
         # else:
         #     print('No use_path provided. Returning residence time only.')
