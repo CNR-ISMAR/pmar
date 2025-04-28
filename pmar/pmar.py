@@ -31,7 +31,7 @@ import cartopy.io.shapereader as shpreader
 import random
 import rasterio
 import tempfile
-from cachetools import LRUCache
+#from cachetools import LRUCache
 from netCDF4 import Dataset
 from pathlib import Path
 import hashlib
