@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, date
 from shapely.geometry import Point, Polygon
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
-import copernicusmarine
+from opendrift.models.chemicaldrift import ChemicalDrift
+#import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
 #from opendrift.readers.reader_netCDF_CF_generic import Reader
 import opendrift
@@ -31,19 +32,17 @@ import cartopy.io.shapereader as shpreader
 import random
 import rasterio
 import tempfile
-#from cachetools import LRUCache
 from netCDF4 import Dataset
 from pathlib import Path
 import hashlib
 import json
-from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
+#from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
 from rasterio.enums import Resampling
 import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
-#from dask.distributed import Client
 from pmar.pmar_cache import PMARCache
 from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file
 
@@ -513,11 +512,13 @@ class PMAR(object):
         # initialise OpenDrift object
         if self.pressure == 'oil':
             self.o = OpenOil(loglevel=loglevel)
+        elif self.pressure == 'chemical':
+            self.o = ChemicalDrift(loglevel=loglevel)
         else:
             self.o = OceanDrift(loglevel=loglevel) 
         
         
-        file_path, file_exists = self.cache.particle_cache(poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
+        file_path, file_exists = self.cache.particle_cache(context=self.context, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -536,12 +537,13 @@ class PMAR(object):
             self.o.add_reader([reader_landmask])
             self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
             
-            readers = []
-            for var in self.context:
-                readers.append(Reader(dataset_id=self.context[var]))
+            #readers = []
+            #for var in self.context:
+             #   readers.append(Reader(dataset_id=self.context[var]))
             print('adding readers...')            
-            self.o.add_reader(readers) # add all readers for that context.
-
+            #self.o.add_reader(readers) # add all readers for that context.
+            self.o.add_readers_from_list(self.context.values())
+            
             # some OpenDrift configurations
             if beaching:
                 self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
@@ -577,7 +579,7 @@ class PMAR(object):
             qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
             temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.origin_marker}.nc'
 
-
+            print('running opendrift...')
             now = datetime.now()
             current_time = now.strftime("%H:%M:%S")
 
@@ -944,7 +946,7 @@ class PMAR(object):
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         print(f'##################### ppi_exists = {ppi_exists}')
         print(f'##################### ppi_path = {ppi_path}')
         # calculate ppi
@@ -1014,7 +1016,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         self.output = xr.Dataset()
         
