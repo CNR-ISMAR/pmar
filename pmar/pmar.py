@@ -166,6 +166,7 @@ class PMAR(object):
                             'termvel': [0, 1e-3, 0], 
                             'decay_coef': [0, 0, 1]})
         
+        print('test branch')
         
         if pressure in pres_list:
             self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
@@ -181,18 +182,18 @@ class PMAR(object):
         if poly_path is not None: 
             Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
             poly = gpd.read_file(poly_path).to_crs('epsg:4326')
-            bds = np.round(poly.total_bounds, 4) 
+            bds = np.round(poly.total_bounds, 4) # only used for poly file name
             local_poly = f'polygon-crs_epsg:{poly.crs}-lon_{bds[0]}_{bds[2]}-lat—{bds[1]}_{bds[3]}.shp'
             q = self.basedir / 'polygons' / local_poly
             poly.to_file(str(q), driver='ESRI Shapefile')
             self.poly_path = str(q)
-        else:
-            if 'med' in self.context:
-                self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
-            elif 'bs' in self.context:
-                self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
-            else:
-                pass
+        #else:
+         #   if 'med' in self.context:
+          #      self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
+           # elif 'bs' in self.context:
+            #    self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
+           # else:
+           #     pass
             
 
         # this (if still needed?) should be a separate method
@@ -281,7 +282,7 @@ class PMAR(object):
         
     def polygon_grid(self, res, r_bounds=None):
         '''
-        Make grid from polygon of domain area.
+        Create grid of given resolution (res) and intersect it with poly_path.
         '''
         
         if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
@@ -549,7 +550,7 @@ class PMAR(object):
              #   readers.append(Reader(dataset_id=self.context[var]))
             print('adding readers...')            
             #self.o.add_reader(readers) # add all readers for that context.
-            self.o.add_readers_from_list(self.context.values()) # this will add readers lazily, and only read them if useful
+            self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful
             
             # some OpenDrift configurations
             if beaching:
@@ -567,10 +568,18 @@ class PMAR(object):
             print('seeding particles...')
             np.random.seed(None)            
 
+            poly = gpd.read_file(self.poly_path)
+            if np.unique(poly.geometry.type) == 'Point':
+                poly['geometry'] = poly.geometry.buffer(.01)
+                seed_poly_path = Path(self.basedir / 'polygons' / ('buffered_'+self.poly_path.split('polygons/')[1]))
+                poly.to_file(seed_poly_path)
+            else:
+                seed_poly_path = self.poly_path
+            
             # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
             if self.depth == True:
                 self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed], 
+                self.o.seed_from_shapefile(shapefile=str(seed_poly_path), number=pnum, time=[start_time, start_time],#+self.tseed], 
                                            terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
@@ -578,7 +587,7 @@ class PMAR(object):
             
             # if simulation is 2D, simply seed particles over polygon
             else:
-                self.o.seed_from_shapefile(shapefile=str(self.poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
+                self.o.seed_from_shapefile(shapefile=str(seed_poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
                                            origin_marker=self.origin_marker, radius=seeding_radius) # 
             
             # run simulation and write to temporary file
