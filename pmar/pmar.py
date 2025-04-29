@@ -44,7 +44,7 @@ import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file
+from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon
 
 logger = logging.getLogger("PMAR")
 
@@ -177,7 +177,6 @@ class PMAR(object):
         else:
             pass
 
-        # this should be a separate method
         # if a path to a shapefile is given to be used for seeding, read it and save it in the lpt_output/polygons dir
         if poly_path is not None: 
             Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
@@ -205,22 +204,6 @@ class PMAR(object):
                 self.reps = len(particle_path)
                 
 
-
-    def get_marine_polygon(self, basin=None):
-        # this would be very useful but e.g. the med is split into all the subbasins with no quick way to group them
-        shpfilename = shpreader.natural_earth(resolution='10m',
-                                category='physical',
-                                name='geography_marine_polys')
-        
-        gdf = gpd.read_file(shpfilename)
-
-        if basin is None:
-            marine_poly = gdf.geometry
-        else:
-            marine_poly = gdf.geometry.set_index('name').loc[str(basin)]
-
-        return marine_poly
-
     def get_context(self, context):
         """
         Parameters
@@ -229,54 +212,71 @@ class PMAR(object):
             One of 'global', 'med', 'black sea', 'baltic'. Returns strings to relevant Copernicus products to add as OpenDrift readers. 
         """
         
-        contexts = {'global': {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 25 Feb 2025
-                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
-                      'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
-                      'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
-                      'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
-                      'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M', # Suspended Particulate Matter, from global ocean color reanalysis, monthly, 1997-2025 (for ChemicalDrift)
-                              }, 
-           'med': {'currents': 'med-cmcc-cur-rean-d', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
-                  'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
-                  'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
-                  'mixed-layer': 'med-cmcc-mld-rean-d', # Mediterranean Sea Physics Reanalysis
-                  'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',  # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
-                  }, 
-           'black sea': {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
-                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
-                      'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
-                      'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
-                      'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i'}, # Black Sea Waves Reanalysis
-           'baltic': {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
-                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
-                      'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
-                      'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 
-                      'stokes': 'cmems_mod_bal_wav_my_PT1H-i'} #Baltic Sea Waves Reanalysis
-           }
+        contexts = {'global': 
+                        {'readers': 
+                         {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 25 Feb 2025
+                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
+                          'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
+                          'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
+                          'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                          'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                         },
+                        'extent': [-180, -80, 179.92, 90],
+                        'polygon': get_marine_polygon()},
+                        
+                        'med': 
+                        {'readers':
+                         {'currents': 'med-cmcc-cur-rean-d', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
+                          'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
+                          'mixed-layer': 'med-cmcc-mld-rean-d', # Mediterranean Sea Physics Reanalysis
+                          'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                         },
+                         'extent': [-6, 30.19, 36.29, 45.98],
+                         'polygon': None,
+                        }, 
+                        
+                        'black sea': 
+                        {'readers': 
+                         {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
+                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                          'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
+                          'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
+                          'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
+                         }, 
+                        'extent': [27.25, 40.5, 42, 47],
+                        'polygon': None
+                        },
+                        
+                        'baltic': 
+                        {'readers': 
+                         {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
+                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                          'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
+                          'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 
+                          'stokes': 'cmems_mod_bal_wav_my_PT1H-i',
+                         },
+                         'extent': [9.04, 53.01, 30.21, 65.89],
+                         'polygon': None,
+                        }
+            }
 
-
-        bounds = {'global': [-180, -80, 179.92, 90],
-                 'med': [-6, 30.19, 36.29, 45.98],
-                 'black sea': [27.25, 40.5, 42, 47], 
-                 'baltic': [9.04, 53.01, 30.21, 65.89],
-                 }
-
-        self.extent = bounds[context]
-        
         if context not in contexts.keys():
-            print('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+            logger.error('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+            
+        self.extent = contexts[context]['extent']
         
         return contexts[context]
 
     
     def x_grid(self):
         if self._x_e is None:
-            raise Error('polygon_grid needs to be called before using this method')
+            logger.error('polygon_grid needs to be called before using this method')
         return self._x_e
 
     def y_grid(self):
         if self._y_e is None:
-            raise Error('polygon_grid needs to be called before using this method')
+            logger.error('polygon_grid needs to be called before using this method')
         return self._y_e
         
     def polygon_grid(self, res, r_bounds=None):
@@ -427,7 +427,7 @@ class PMAR(object):
             # set crs and reproject to desired crs 
             poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
         else:
-            raise ValueError("'lon' and 'lat' must have lenght larger than 2")
+            logger.error("'lon' and 'lat' must have lenght larger than 2")
         
         if write is True:
             poly.to_file(str(q), driver='ESRI Shapefile')
@@ -498,11 +498,17 @@ class PMAR(object):
         self.tstep = tstep
         
         # polygon used for seeding of particles (poly_path). if s_bounds are given, a new polygon is created using those bounds. 
-        if s_bounds is None:
-            s_bounds = self.extent
-        lon = s_bounds[0::2]
-        lat = s_bounds[1::2]
-        self.make_poly(lon, lat, crs=crs)
+        # this creates a square polygon even if a poly_path is given. not what we want
+        #if s_bounds is None:
+         #   s_bounds = self.extent
+        #lon = s_bounds[0::2]
+        #lat = s_bounds[1::2]
+        #self.make_poly(lon, lat, crs=crs)
+        ### INSTEAD
+        if s_bounds is not None:
+            lon = s_bounds[0::2]
+            lat = s_bounds[1::2]
+            self.make_poly(lon, lat, crs=crs)
         
         # path to write particle simulation file. also used for our 'cache'    
         poly = gpd.read_file(self.poly_path)
