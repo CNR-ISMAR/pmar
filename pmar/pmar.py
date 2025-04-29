@@ -233,13 +233,14 @@ class PMAR(object):
                       'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
                       'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
                       'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
-                      'stokes':'cmems_mod_glo_wav_my_0.2deg_PT3H-i'}, # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                      'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                      'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M', # Suspended Particulate Matter, from global ocean color reanalysis, monthly, 1997-2025 (for ChemicalDrift)
+                              }, 
            'med': {'currents': 'med-cmcc-cur-rean-d', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
                   'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
                   'mixed-layer': 'med-cmcc-mld-rean-d', # Mediterranean Sea Physics Reanalysis
                   'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',  # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
-                   #'extent': [30.19, 45.98, -6, 36.29], # [x1,x2,y1,y2]
                   }, 
            'black sea': {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
                       'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
@@ -542,7 +543,7 @@ class PMAR(object):
              #   readers.append(Reader(dataset_id=self.context[var]))
             print('adding readers...')            
             #self.o.add_reader(readers) # add all readers for that context.
-            self.o.add_readers_from_list(self.context.values())
+            self.o.add_readers_from_list(self.context.values()) # this will add readers lazily, and only read them if useful
             
             # some OpenDrift configurations
             if beaching:
