@@ -25,7 +25,7 @@ class PMARCache(object):
         cache_key = {'context': context,'poly_path': poly_path, 'pnum': pnum, 'start_time': start_time.strftime("%Y-%m-%d"), 'season': season, 'duration_days': duration_days, 's_bounds': s_bounds, 'seeding_radius': seeding_radius, 'beaching': beaching, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'crs': crs, 'stokes_drift': stokes_drift}
         path_data_file = self.get_data_file('nc', **cache_key) # chiave della cache e nome del file
         self.set_metadata('nc', **cache_key) #TODO spostare
-        logger.error('particle cache = '+str(cache_key))
+        logger.info('particle cache = '+str(cache_key))
         return path_data_file, path_data_file.exists()
         
 
@@ -34,5 +34,5 @@ class PMARCache(object):
         path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
         #path_data_file = Path(str(_path_data_file).split('.tif')[0]+'_use-RES-TIME.tif')
         self.set_metadata('tif', **cache_key) #TODO spostare
-        logger.error('raster cache = '+str(cache_key))
+        logger.info('raster cache = '+str(cache_key))
         return path_data_file, path_data_file.exists()
