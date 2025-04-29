@@ -2,7 +2,7 @@ import numpy as np
 import xarray as xr
 from copy import deepcopy
 import cartopy.io.shapereader as shpreader
-
+import geopandas as gpd
 
 def get_marine_polygon(basin=None):
     '''
