@@ -94,7 +94,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
+    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
         """
         Parameters
         ---------- 
@@ -132,7 +132,7 @@ class PMAR(object):
         #self.ds = None. commented otherwise try: self.ds except: does not work
         self.o = None
         self.poly_path = poly_path 
-        self.raster = None
+#        self.raster = None unused
         self.origin_marker = 0
         #self.netrc_path = netrc_path
         self.tstep = None
@@ -159,15 +159,17 @@ class PMAR(object):
         self.r_bounds = None
         self.res = None
 
+        self.study_area = None # this will substitude r_bounds 
+        self.seeding_shapefile = seeding_shapefile # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
+        self.seed_within_bounds = None # this will substitude s_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
+
         # This should be a separate method
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_coef'], 
                     data = {'pressure': pres_list, 
                             'termvel': [0, 1e-3, 0], 
                             'decay_coef': [0, 0, 1]})
-        
-        print('test branch')
-        
+                
         if pressure in pres_list:
             self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
             self.decay_coef = pressures[pressures['pressure'] == f'{pressure}']['decay_coef'].values[0]
@@ -512,8 +514,8 @@ class PMAR(object):
             self.make_poly(lon, lat, crs=crs)
         
         # path to write particle simulation file. also used for our 'cache'    
-        poly = gpd.read_file(self.poly_path)
-        bds = np.round(poly.total_bounds, 4) # only used in particle_path
+        #poly = gpd.read_file(self.poly_path)
+        bds = np.round(gpd.read_file(self.seeding_shapefile).total_bounds, 4) # only used in particle_path # PUT SEEDING SHAPEFILE RATHER THAN POLY PATH
         t0 = start_time.strftime('%Y-%m-%d')
         t1 = end_time.strftime('%Y-%m-%d')
         
@@ -526,7 +528,7 @@ class PMAR(object):
             self.o = OceanDrift(loglevel=loglevel) 
         
         
-        file_path, file_exists = self.cache.particle_cache(context=self.context, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
+        file_path, file_exists = self.cache.particle_cache(context=self.context, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -568,18 +570,29 @@ class PMAR(object):
             print('seeding particles...')
             np.random.seed(None)            
 
-            poly = gpd.read_file(self.poly_path)
-            if np.unique(poly.geometry.type) == 'Point':
-                poly['geometry'] = poly.geometry.buffer(.01)
-                seed_poly_path = Path(self.basedir / 'polygons' / ('buffered_'+self.poly_path.split('polygons/')[1]))
-                poly.to_file(seed_poly_path)
-            else:
-                seed_poly_path = self.poly_path
+            # poly = gpd.read_file(self.poly_path)
+            # if np.unique(poly.geometry.type) == 'Point':
+            #     poly['geometry'] = poly.geometry.buffer(.01)
+            #     seed_poly_path = Path(self.basedir / 'polygons' / ('buffered_'+self.poly_path.split('polygons/')[1]))
+            #     poly.to_file(seed_poly_path)
+            # else:
+            #     seed_poly_path = self.poly_path
+                
+            seeding_poly = gpd.read_file(self.seeding_shapefile)
+            if np.unique(seeding_poly.geometry.type) == 'Point':
+                seeding_poly['geometry'] = seeding_poly.geometry.buffer(.01)
+                new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
+                seeding_poly.to_file(new_seeding_shapefile)
+                self.seeding_shapefile = str(new_seeding_shapefile)
+                logger.info(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
+           # else:
+            #    seed_poly_path = self.seeding_shapefile
+            
             
             # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
             if self.depth == True:
                 self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
-                self.o.seed_from_shapefile(shapefile=str(seed_poly_path), number=pnum, time=[start_time, start_time],#+self.tseed], 
+                self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time, 
                                            terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('general:seafloor_action', 'deactivate')
@@ -587,7 +600,7 @@ class PMAR(object):
             
             # if simulation is 2D, simply seed particles over polygon
             else:
-                self.o.seed_from_shapefile(shapefile=str(seed_poly_path), number=pnum, time=[start_time, start_time],#+self.tseed],
+                self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time,
                                            origin_marker=self.origin_marker, radius=seeding_radius) # 
             
             # run simulation and write to temporary file
@@ -620,9 +633,9 @@ class PMAR(object):
             #print('time len after ffill inactive', len(ps.time))
 
             # write useful attributes
-            ps = ps.assign_attrs({'total_bounds': poly.total_bounds, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
+            ps = ps.assign_attrs({'total_bounds': seeding_poly.total_bounds, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
                                   #'tseed': self.tseed.total_seconds(), 
-                                  'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth),
+                                  'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': str(self.seeding_shapefile),
                                   'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
 
 
