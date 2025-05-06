@@ -94,14 +94,16 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='general', basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
+    def __init__(self, context, pressure='general', chemical_compound=None, basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
         """
         Parameters
         ---------- 
         context : str
             String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
         pressure : str, optional
-            
+
+        chemical_compound : str, optional
+            if pressure is 'chemical', a chemical_compound can be specified to be initialised in ChemicalDrift
         basedir : str, optional
             path to the base directory where all output will be stored. Default is to create a directory called 'lpt output' in the current directory.
         localdatadir : str, optional
@@ -143,6 +145,7 @@ class PMAR(object):
         self.context = self.get_context(str(context))
         self.outputdir = None
         self.pressure = pressure
+        self.chemical_compound = chemical_compound
         self.localdatadir = localdatadir
         self.particle_status = None
         self.reps = 1
@@ -220,7 +223,7 @@ class PMAR(object):
                          {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 25 Feb 2025
                           'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
                           'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
-                          'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
+                          #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
                           'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
                           'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                          },
@@ -281,50 +284,55 @@ class PMAR(object):
         if self._y_e is None:
             logger.error('polygon_grid needs to be called before using this method')
         return self._y_e
-        
+
+    #@property
+    #def polygon_grid(self):
+     #   return self._polygon_grid
+
+    #@polygon_grid.setter
     def polygon_grid(self, res, r_bounds=None):
         '''
         Create grid of given resolution (res) and intersect it with poly_path.
         '''
         
-        if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
-            print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
+        # if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
+        #     print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
+        # else:
+        logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
+        #res = self.res 
+        crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
+        
+        if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
+            poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
+            logger.info(f'making new polygon_grid using r_bounds = {r_bounds}')
         else:
-            print(f'polygon_grid: calculating new polygon_grid with resolution = {res}.')
-            #res = self.res 
-            crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
-            
-            if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
-                poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
-                print('polygon_grid: use r_bounds to make new polygon_grid')
-            else:
-                poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
-            
-            xmin, ymin, xmax, ymax = poly.total_bounds
-            
-            cols = list(np.arange(xmin, xmax + res, res))               
-            rows = list(np.arange(ymin, ymax + res, res)) 
-            
-            polygons = [] 
-            #print('polygon_grid: starting for loop...')
-            for y in rows[:-1]:                
-                for x in cols[:-1]:    
-                    polygons.append(Polygon([(x,y),
-                                             (x+res, y),
-                                             (x+res, y+res),
-                                             (x, y+res)]))
-            #print('polygon_grid: for loop done!')
-            
-            grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
-    
-            #print('intersecting grid with poly')
-            intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
-            self._polygon_grid = intersect
-            
-            self._x_e = np.array(cols) # outer edge coordinates
-            self._y_e = np.array(rows)
-            self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
-            self._y_c = np.unique(self._polygon_grid.centroid.y.values)
+            poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+        
+        xmin, ymin, xmax, ymax = poly.total_bounds
+        
+        cols = list(np.arange(xmin, xmax + res, res))               
+        rows = list(np.arange(ymin, ymax + res, res)) 
+        
+        polygons = [] 
+        #print('polygon_grid: starting for loop...')
+        for y in rows[:-1]:                
+            for x in cols[:-1]:    
+                polygons.append(Polygon([(x,y),
+                                         (x+res, y),
+                                         (x+res, y+res),
+                                         (x, y+res)]))
+        #print('polygon_grid: for loop done!')
+        
+        grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
+
+        #print('intersecting grid with poly')
+        intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
+        self._polygon_grid = intersect
+        
+        self._x_e = np.array(cols) # outer edge coordinates
+        self._y_e = np.array(rows)
+        self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
+        self._y_c = np.unique(self._polygon_grid.centroid.y.values)
             
         #print('polygon_grid: done.')
         self.res = res
@@ -519,24 +527,78 @@ class PMAR(object):
         t0 = start_time.strftime('%Y-%m-%d')
         t1 = end_time.strftime('%Y-%m-%d')
         
-        # initialise OpenDrift object
-        if self.pressure == 'oil':
-            self.o = OpenOil(loglevel=loglevel)
-        elif self.pressure == 'chemical':
-            self.o = ChemicalDrift(loglevel=loglevel)
-        else:
-            self.o = OceanDrift(loglevel=loglevel) 
-        
         
         file_path, file_exists = self.cache.particle_cache(context=self.context, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             ps = xr.open_mfdataset(file_path)
-            print(f'NOTE: Opendrift file with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant with cachedir
+            logger.info(f'NOTE: Opendrift file with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant with cachedir
 
         # otherwise, run requested simulation
         elif file_exists == False:
+            
+            # initialise OpenDrift object
+            if self.pressure == 'oil':
+                self.o = OpenOil(loglevel=loglevel)
+            elif self.pressure == 'chemical':
+                self.o = ChemicalDrift(loglevel=loglevel)
+            else:
+                self.o = OceanDrift(loglevel=loglevel) 
+                
+            
+            # some OpenDrift configurations
+            if beaching:
+                self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            else:
+                self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
+            
+            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
+            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            
+            # ChemicalDrift configs -- values are only an example for now
+            ## DO NOT CHANGE ORDER OF CONFIGS ## 
+            if self.pressure == 'chemical':
+                self.o.set_config('drift:vertical_mixing', True)
+                self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
+                self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
+                self.o.set_config('vertical_mixing:timestep', 60)
+                #o.set_config('drift:horizontal_diffusivity', 10)
+                
+                self.o.set_config('chemical:particle_diameter',25.e-6)  # m
+                #o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
+                #o.set_config('chemical:transformations:Kd',2.e0) # (m3/kg)
+                #o.set_config('chemical:transformations:slow_coeff',1.e-6)
+                
+                # Parameters from radionuclides (Magne Simonsen 2019)
+                self.o.set_config('chemical:sediment:resuspension_depth',1.)
+                self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1)
+                self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
+                self.o.set_config('chemical:sediment:desorption_depth',1.)
+                self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
+                
+                # 
+                self.o.set_config('chemical:transformations:volatilization', True)
+                self.o.set_config('chemical:transformations:degradation', True)
+                self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
+                
+                # Chemical properties
+                self.o.set_config('chemical:transfer_setup','organics')
+                self.o.set_config('chemical:transformations:dissociation','nondiss')
+                
+                self.o.init_chemical_compound(self.chemical_compound) 
+                logger.info(f'initialising chemical compound {self.chemical_compound}')
+
+                #o.set_config('seed:LMM_fraction',.995)
+                #o.set_config('seed:particle_fraction',.005)
+                self.o.set_config('seed:LMM_fraction',.5)
+                self.o.set_config('seed:particle_fraction',.5)
+
+                # these have to be here in this order otherwise it gives error
+                self.o.init_species() 
+                self.o.init_transfer_rates()
+                                
+
             print('adding landmask...')
             # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
             shpfilename = shpreader.natural_earth(resolution='10m',
@@ -547,20 +609,12 @@ class PMAR(object):
             self.o.add_reader([reader_landmask])
             self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
             
-            #readers = []
-            #for var in self.context:
-             #   readers.append(Reader(dataset_id=self.context[var]))
             print('adding readers...')            
-            #self.o.add_reader(readers) # add all readers for that context.
-            self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful
-            
-            # some OpenDrift configurations
-            if beaching:
-                self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
-            else:
-                self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
-            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
-            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            readers = []
+            for var in self.context['readers']:
+                readers.append(Reader(dataset_id=self.context['readers'][var]))
+            self.o.add_reader(readers) # add all readers for that context.
+            #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
             
             # uncertainty
             #self.o.set_config('drift:current_uncertainty', .1)
@@ -870,12 +924,13 @@ class PMAR(object):
             r_bounds = self.extent # take whole basin
             
         if use_path is None:
+            logger.info('no use_path provided. calculating ppi from unity-use.')
             self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
             self.use_path = Path (self.basedir / 'unity-use.tif')
         
-        weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
+        #weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
         
-        r = self.get_histogram(res=res, r_bounds=r_bounds, weight=weights, normalize=False, block_size=len(self.ds.time)).assign_attrs({'use_path': use_path})
+        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, block_size=len(self.ds.time), use_path=use_path).assign_attrs({'use_path': use_path})
 
         return r
 
