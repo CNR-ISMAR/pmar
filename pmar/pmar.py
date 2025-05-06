@@ -268,7 +268,7 @@ class PMAR(object):
             }
 
         if context not in contexts.keys():
-            logger.error('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+            raise ValueError('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
             
         self.extent = contexts[context]['extent']
         
@@ -277,12 +277,12 @@ class PMAR(object):
     
     def x_grid(self):
         if self._x_e is None:
-            logger.error('polygon_grid needs to be called before using this method')
+            raise ValueError('polygon_grid needs to be called before using this method')
         return self._x_e
 
     def y_grid(self):
         if self._y_e is None:
-            logger.error('polygon_grid needs to be called before using this method')
+            raise ValueError('polygon_grid needs to be called before using this method')
         return self._y_e
 
     #@property
@@ -340,6 +340,7 @@ class PMAR(object):
         return self._polygon_grid
 
     def raster_grid(self, res=None, r_bounds=None):
+        logger.warning(f'rasterizing grid with extent = {r_bounds}')
         grid = self.polygon_grid(res=res, r_bounds=r_bounds)
         grid['weight'] = 1
         _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
@@ -438,7 +439,7 @@ class PMAR(object):
             # set crs and reproject to desired crs 
             poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
         else:
-            logger.error("'lon' and 'lat' must have lenght larger than 2")
+            raise ValueError("'lon' and 'lat' must have length larger than 2")
         
         if write is True:
             poly.to_file(str(q), driver='ESRI Shapefile')
@@ -533,7 +534,7 @@ class PMAR(object):
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             ps = xr.open_mfdataset(file_path)
-            logger.info(f'NOTE: Opendrift file with these configurations already exists within {self.basedir} and has been imported. Please delete the existing file to produce a new simulation.') ### this might be irrelevant with cachedir
+            logger.error(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
 
         # otherwise, run requested simulation
         elif file_exists == False:
@@ -559,16 +560,14 @@ class PMAR(object):
             # ChemicalDrift configs -- values are only an example for now
             ## DO NOT CHANGE ORDER OF CONFIGS ## 
             if self.pressure == 'chemical':
-                self.o.set_config('drift:vertical_mixing', True)
+                self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
                 self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
-                self.o.set_config('vertical_mixing:timestep', 60)
+                #self.o.set_config('vertical_mixing:timestep', 60) commenting because it's the default value anyway
                 #o.set_config('drift:horizontal_diffusivity', 10)
                 
                 self.o.set_config('chemical:particle_diameter',25.e-6)  # m
-                #o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
-                #o.set_config('chemical:transformations:Kd',2.e0) # (m3/kg)
-                #o.set_config('chemical:transformations:slow_coeff',1.e-6)
+                self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
                 
                 # Parameters from radionuclides (Magne Simonsen 2019)
                 self.o.set_config('chemical:sediment:resuspension_depth',1.)
@@ -578,15 +577,15 @@ class PMAR(object):
                 self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
                 
                 # 
-                self.o.set_config('chemical:transformations:volatilization', True)
-                self.o.set_config('chemical:transformations:degradation', True)
+                self.o.set_config('chemical:transformations:volatilization', True) # not always true, e.g. for Cd
+                self.o.set_config('chemical:transformations:degradation', True) # not always true, e.g. for Cd
                 self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
                 
-                # Chemical properties
-                self.o.set_config('chemical:transfer_setup','organics')
-                self.o.set_config('chemical:transformations:dissociation','nondiss')
+                # Chemical properties ### these are already set up in init_chemical_compound, at least for PAHs
+                #self.o.set_config('chemical:transfer_setup','organics')
+                #self.o.set_config('chemical:transformations:dissociation','nondiss')
                 
-                self.o.init_chemical_compound(self.chemical_compound) 
+                self.o.init_chemical_compound(self.chemical_compound) # works for a selection of PAHs
                 logger.info(f'initialising chemical compound {self.chemical_compound}')
 
                 #o.set_config('seed:LMM_fraction',.995)
@@ -818,13 +817,18 @@ class PMAR(object):
         print('done.')
         return normalized_weight
 
-    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, decay_coef=0, normalize=False, assign=False):
+    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
         
         if use_path is not None:
             # extract value of use at starting position of each trajectory
             use_value = self.use_by_traj(use_path=use_path, res=res, r_bounds=r_bounds)
             weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
 
+        if emission is not None:
+            self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
+            logger.warning(f'Converted emission from {emission} per day to {self.emission} per timestep.')
+            weight = weight*self.emission
+        
         if decay_coef != 0:
         # decay rate. default is no decay, but this is still useful to give weight the correct shape
             print(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
@@ -875,7 +879,7 @@ class PMAR(object):
             
         return ds
 
-    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=False, dim=['trajectory', 'time'], block_size='auto', use_path=None, decay_coef=0):
+    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=False, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
         '''
         "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
         from Stanev et al., 2019
@@ -896,7 +900,7 @@ class PMAR(object):
         xbin = self._x_e
         ybin = self._y_e
 
-        weights = self.set_weights(res=res, r_bounds=r_bounds, weight=weight, normalize=normalize, use_path=use_path, decay_coef=decay_coef, assign=assign)
+        weights = self.set_weights(res=res, r_bounds=r_bounds, weight=weight, normalize=normalize, use_path=use_path, emission=emission, decay_coef=decay_coef, assign=assign)
         print('set_weights done.')
         
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
@@ -909,7 +913,7 @@ class PMAR(object):
         return h
 
 
-    def ppi(self, use_path, res, r_bounds=None, decay_coef=0, normalize=True): 
+    def ppi(self, res, use_path=None, emission=None, r_bounds=None, decay_coef=0, normalize=True): 
         '''
         Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
         ppi is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
@@ -917,20 +921,34 @@ class PMAR(object):
 
         Parameters
         ----------
+        res : float
+        
         use_path : str
-            Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
+            Path of file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
+        emission : float, optional
+            amount of pressure released per day by use in use_path 
+        r_bounds : list, optional
+
+        decay_coef : float, optional
+
+        normalize : bool, optional
+        
         '''
         if r_bounds is None:
             r_bounds = self.extent # take whole basin
-            
+        
         if use_path is None:
             logger.info('no use_path provided. calculating ppi from unity-use.')
             self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
             self.use_path = Path (self.basedir / 'unity-use.tif')
         
+        # if emission is not None:
+        #     self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
+        #     logger.warning(f'Converted emission from {emission} per day to {self.emission} per timestep.')
+            
         #weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
-        
-        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, block_size=len(self.ds.time), use_path=use_path).assign_attrs({'use_path': use_path})
+
+        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, block_size=len(self.ds.time), use_path=use_path, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
