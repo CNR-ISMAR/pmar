@@ -529,7 +529,7 @@ class PMAR(object):
         t1 = end_time.strftime('%Y-%m-%d')
         
         
-        file_path, file_exists = self.cache.particle_cache(context=self.context, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
+        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -1048,7 +1048,7 @@ class PMAR(object):
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         print(f'##################### ppi_exists = {ppi_exists}')
         print(f'##################### ppi_path = {ppi_path}')
         # calculate ppi
@@ -1118,7 +1118,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         self.output = xr.Dataset()
         
