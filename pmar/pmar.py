@@ -534,7 +534,7 @@ class PMAR(object):
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             ps = xr.open_mfdataset(file_path)
-            logger.error(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
+            logger.warning(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
 
         # otherwise, run requested simulation
         elif file_exists == False:
@@ -542,7 +542,7 @@ class PMAR(object):
             # initialise OpenDrift object
             if self.pressure == 'oil':
                 self.o = OpenOil(loglevel=loglevel)
-            elif self.pressure == 'chemical':
+            elif self.pressure in ['chemical', 'metal']:
                 self.o = ChemicalDrift(loglevel=loglevel)
             else:
                 self.o = OceanDrift(loglevel=loglevel) 
@@ -559,39 +559,39 @@ class PMAR(object):
             
             # ChemicalDrift configs -- values are only an example for now
             ## DO NOT CHANGE ORDER OF CONFIGS ## 
-            if self.pressure == 'chemical':
+            if self.pressure in ['chemical', 'metal']:
                 self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
                 self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
                 self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
-                #self.o.set_config('vertical_mixing:timestep', 60) commenting because it's the default value anyway
+                #self.o.set_config('vertical_mixing:timestep', 60) is default
                 #o.set_config('drift:horizontal_diffusivity', 10)
-                
-                self.o.set_config('chemical:particle_diameter',25.e-6)  # m
-                self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
+
+                # leaving default values
+                #self.o.set_config('chemical:particle_diameter',25.e-6)  # m
+                #self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
                 
                 # Parameters from radionuclides (Magne Simonsen 2019)
-                self.o.set_config('chemical:sediment:resuspension_depth',1.)
-                self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1)
+                #self.o.set_config('chemical:sediment:resuspension_depth',1.) is default
+                self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1) # there are default values for these 
                 self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
                 self.o.set_config('chemical:sediment:desorption_depth',1.)
                 self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
                 
-                # 
-                self.o.set_config('chemical:transformations:volatilization', True) # not always true, e.g. for Cd
-                self.o.set_config('chemical:transformations:degradation', True) # not always true, e.g. for Cd
-                self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
+                #if self.pressure == 'metal':
+                  #  self.o.set_config('chemical:transformations:volatilization', False) default is False
+                    #self.o.set_config('chemical:transformations:degradation', False)  default is False
+                if self.pressure == 'chemical':
+                    self.o.set_config('chemical:transformations:volatilization', True) 
+                    self.o.set_config('chemical:transformations:degradation', True) 
+                    self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
                 
-                # Chemical properties ### these are already set up in init_chemical_compound, at least for PAHs
-                #self.o.set_config('chemical:transfer_setup','organics')
-                #self.o.set_config('chemical:transformations:dissociation','nondiss')
-                
-                self.o.init_chemical_compound(self.chemical_compound) # works for a selection of PAHs
+                self.o.init_chemical_compound(self.chemical_compound) # includes a selection of PAHs and metals
                 logger.info(f'initialising chemical compound {self.chemical_compound}')
 
-                #o.set_config('seed:LMM_fraction',.995)
-                #o.set_config('seed:particle_fraction',.005)
-                self.o.set_config('seed:LMM_fraction',.5)
-                self.o.set_config('seed:particle_fraction',.5)
+                # by default, all is dissolved at seeding. maybe parametrise in future
+                LMM_fraction = 1
+                self.o.set_config('seed:LMM_fraction',LMM_fraction)
+                self.o.set_config('seed:particle_fraction',1-LMM_fraction)
 
                 # these have to be here in this order otherwise it gives error
                 self.o.init_species() 
@@ -648,7 +648,7 @@ class PMAR(object):
                 self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time, 
                                            terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
                 #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-                self.o.set_config('general:seafloor_action', 'deactivate')
+                self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
                 self.o.set_config('drift:vertical_mixing', True)
             
             # if simulation is 2D, simply seed particles over polygon
@@ -667,7 +667,7 @@ class PMAR(object):
 
             self.o.run(duration=duration, #end_time=end_time, 
                        time_step=time_step, #time_step_output=timedelta(hours=24), 
-                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker'])#, 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness',])# 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness',])# 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
             elapsed = (T.time() - t_0)
             print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
