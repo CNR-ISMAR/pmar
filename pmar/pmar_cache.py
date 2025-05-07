@@ -29,8 +29,8 @@ class PMARCache(object):
         return path_data_file, path_data_file.exists()
         
 
-    def raster_cache(self, context, pressure, chemical_compound, seeding_shapefile, res, poly_path, pnum, ptot, duration, start_time, reps, tshift, use_path, use_label, decay_coef, r_bounds):
-        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration': duration, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 'use_path': use_path, 'use_label': use_label, 'decay_coef': decay_coef, 'r_bounds': r_bounds}
+    def raster_cache(self, context, pressure, chemical_compound, seeding_shapefile, seeding_radius, res, poly_path, pnum, ptot, duration, start_time, reps, tshift, use_path, use_label, decay_coef, r_bounds):
+        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'seeding_radius': seeding_radius, 'res': res, 'poly_path': poly_path, 'pnum': pnum, 'ptot': ptot, 'duration': duration, 'start_time': start_time, 'reps': reps, 'tshift': tshift, 'use_path': use_path, 'use_label': use_label, 'decay_coef': decay_coef, 'r_bounds': r_bounds}
         path_data_file = self.get_data_file('tif', **cache_key) # chiave della cache e nome del file
         #path_data_file = Path(str(_path_data_file).split('.tif')[0]+'_use-RES-TIME.tif')
         self.set_metadata('tif', **cache_key) #TODO spostare
