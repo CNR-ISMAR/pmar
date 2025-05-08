@@ -366,7 +366,7 @@ class PMAR(object):
         # if they don't match, i am probably only looking at the last rep. 
         try:
             self.ds
-            logger.info('get_ds: returning previously calculated ds.')
+            #logger.info('get_ds: returning previously calculated ds.')
         except:
             logger.info('get_ds: retrieving ds from particle_path.')
             if type(self.particle_path) is str or len(self.particle_path) == 1:
@@ -380,8 +380,11 @@ class PMAR(object):
                 logger.info(f'self.reps = {self.reps}')
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
             
+            
             self.ds = ds
-            logger.info('get_ds: done.')
+            #logger.info('get_ds: done.')
+
+        
 
         return self.ds
 
@@ -539,188 +542,191 @@ class PMAR(object):
         t1 = end_time.strftime('%Y-%m-%d')
         
         
-        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
+        # file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
 
-        self.particle_path = str(file_path)
+        # self.particle_path = str(file_path)
 
-        # if a file with that name already exists, simply import it  
-        if file_exists == True:
-            ps = xr.open_mfdataset(file_path)
-            self.seeding_shapefile = ps.seeding_shapefile
-            self.poly_path = ps.poly_path
-            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') 
+        # # if a file with that name already exists, simply import it  
+        # if file_exists == True:
+        #     #ps = xr.open_mfdataset(file_path)
+        #     ps = self.get_ds
+        #     self.seeding_shapefile = ps.seeding_shapefile
+        #     self.poly_path = ps.poly_path
+        #     logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') 
 
-        # otherwise, run requested simulation
+        # # otherwise, run requested simulation
+        # else:
+            
+        # initialise OpenDrift object
+        if self.pressure == 'oil':
+            self.o = OpenOil(loglevel=loglevel)
+        elif self.pressure in ['chemical', 'metal']:
+            self.o = ChemicalDrift(loglevel=loglevel)
         else:
+            self.o = OceanDrift(loglevel=loglevel) 
             
-            # initialise OpenDrift object
-            if self.pressure == 'oil':
-                self.o = OpenOil(loglevel=loglevel)
-            elif self.pressure in ['chemical', 'metal']:
-                self.o = ChemicalDrift(loglevel=loglevel)
-            else:
-                self.o = OceanDrift(loglevel=loglevel) 
-                
+        
+        # some OpenDrift configurations
+        if beaching:
+            self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+        else:
+            self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
+        
+        self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
+        self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+        
+        # ChemicalDrift configs -- values are only an example for now
+        ## DO NOT CHANGE ORDER OF CONFIGS ## 
+        if self.pressure in ['chemical', 'metal']:
+            self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
+            self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
+            self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
+            #self.o.set_config('vertical_mixing:timestep', 60) is default
+            #o.set_config('drift:horizontal_diffusivity', 10)
+
+            # leaving default values
+            #self.o.set_config('chemical:particle_diameter',25.e-6)  # m
+            #self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
             
-            # some OpenDrift configurations
-            if beaching:
-                self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
-            else:
-                self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
+            # Parameters from radionuclides (Magne Simonsen 2019)
+            #self.o.set_config('chemical:sediment:resuspension_depth',1.) is default
+            self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1) # there are default values for these 
+            self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
+            self.o.set_config('chemical:sediment:desorption_depth',1.)
+            self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
             
-            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
-            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            #if self.pressure == 'metal':
+              #  self.o.set_config('chemical:transformations:volatilization', False) default is False
+                #self.o.set_config('chemical:transformations:degradation', False)  default is False
+            if self.pressure == 'chemical':
+                self.o.set_config('chemical:transformations:volatilization', True) 
+                self.o.set_config('chemical:transformations:degradation', True) 
+                self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
             
-            # ChemicalDrift configs -- values are only an example for now
-            ## DO NOT CHANGE ORDER OF CONFIGS ## 
-            if self.pressure in ['chemical', 'metal']:
-                self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
-                self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-                self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
-                #self.o.set_config('vertical_mixing:timestep', 60) is default
-                #o.set_config('drift:horizontal_diffusivity', 10)
+            self.o.init_chemical_compound(self.chemical_compound) # includes a selection of PAHs and metals
+            logger.info(f'initialising chemical compound {self.chemical_compound}')
 
-                # leaving default values
-                #self.o.set_config('chemical:particle_diameter',25.e-6)  # m
-                #self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
-                
-                # Parameters from radionuclides (Magne Simonsen 2019)
-                #self.o.set_config('chemical:sediment:resuspension_depth',1.) is default
-                self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1) # there are default values for these 
-                self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
-                self.o.set_config('chemical:sediment:desorption_depth',1.)
-                self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
-                
-                #if self.pressure == 'metal':
-                  #  self.o.set_config('chemical:transformations:volatilization', False) default is False
-                    #self.o.set_config('chemical:transformations:degradation', False)  default is False
-                if self.pressure == 'chemical':
-                    self.o.set_config('chemical:transformations:volatilization', True) 
-                    self.o.set_config('chemical:transformations:degradation', True) 
-                    self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
-                
-                self.o.init_chemical_compound(self.chemical_compound) # includes a selection of PAHs and metals
-                logger.info(f'initialising chemical compound {self.chemical_compound}')
+            # by default, all is dissolved at seeding. maybe parametrise in future
+            LMM_fraction = 1
+            self.o.set_config('seed:LMM_fraction',LMM_fraction)
+            self.o.set_config('seed:particle_fraction',1-LMM_fraction)
 
-                # by default, all is dissolved at seeding. maybe parametrise in future
-                LMM_fraction = 1
-                self.o.set_config('seed:LMM_fraction',LMM_fraction)
-                self.o.set_config('seed:particle_fraction',1-LMM_fraction)
+            # these have to be here in this order otherwise it gives error
+            self.o.init_species() 
+            self.o.init_transfer_rates()
+                            
 
-                # these have to be here in this order otherwise it gives error
-                self.o.init_species() 
-                self.o.init_transfer_rates()
-                                
+        logger.info('adding landmask...')
+        # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
+        shpfilename = shpreader.natural_earth(resolution='10m',
+                                category='cultural',
+                                name='admin_0_countries')
+        reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
+        
+        self.o.add_reader([reader_landmask])
+        self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
+        
+        logger.info('adding readers...')            
+        readers = []
+        for var in self.context['readers']:
+            readers.append(Reader(dataset_id=self.context['readers'][var]))
+        self.o.add_reader(readers) # add all readers for that context.
+        #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
+        
+        # uncertainty
+        #self.o.set_config('drift:current_uncertainty', .1)
+        #self.o.set_config('drift:wind_uncertainty', 1)
 
-            logger.info('adding landmask...')
-            # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
-            shpfilename = shpreader.natural_earth(resolution='10m',
-                                    category='cultural',
-                                    name='admin_0_countries')
-            reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
-            
-            self.o.add_reader([reader_landmask])
-            self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
-            
-            logger.info('adding readers...')            
-            readers = []
-            for var in self.context['readers']:
-                readers.append(Reader(dataset_id=self.context['readers'][var]))
-            self.o.add_reader(readers) # add all readers for that context.
-            #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
-            
-            # uncertainty
-            #self.o.set_config('drift:current_uncertainty', .1)
-            #self.o.set_config('drift:wind_uncertainty', 1)
+        ##### SEEDING #####
+        logger.info('seeding particles...')
+        np.random.seed(None)            
 
-            ##### SEEDING #####
-            logger.info('seeding particles...')
-            np.random.seed(None)            
+        # poly = gpd.read_file(self.poly_path)
+        # if np.unique(poly.geometry.type) == 'Point':
+        #     poly['geometry'] = poly.geometry.buffer(.01)
+        #     seed_poly_path = Path(self.basedir / 'polygons' / ('buffered_'+self.poly_path.split('polygons/')[1]))
+        #     poly.to_file(seed_poly_path)
+        # else:
+        #     seed_poly_path = self.poly_path
+        if s_bounds is not None:
+            lon = s_bounds[0::2]
+            lat = s_bounds[1::2]
+            self.make_poly(lon, lat, crs=crs, write=True)
+            self.seeding_shapefile = self.poly_path
+        elif s_bounds is None and self.seeding_shapefile is None:
+            lon = self.extent[0::2]
+            lat = self.extent[1::2]
+            self.make_poly(lon, lat, crs=crs, write=True)
+            self.seeding_shapefile = self.poly_path
+        else:
+            logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
 
-            # poly = gpd.read_file(self.poly_path)
-            # if np.unique(poly.geometry.type) == 'Point':
-            #     poly['geometry'] = poly.geometry.buffer(.01)
-            #     seed_poly_path = Path(self.basedir / 'polygons' / ('buffered_'+self.poly_path.split('polygons/')[1]))
-            #     poly.to_file(seed_poly_path)
-            # else:
-            #     seed_poly_path = self.poly_path
-            if s_bounds is not None:
-                lon = s_bounds[0::2]
-                lat = s_bounds[1::2]
-                self.make_poly(lon, lat, crs=crs, write=True)
-                self.seeding_shapefile = self.poly_path
-            elif s_bounds is None and self.seeding_shapefile is None:
-                lon = self.extent[0::2]
-                lat = self.extent[1::2]
-                self.make_poly(lon, lat, crs=crs, write=True)
-                self.seeding_shapefile = self.poly_path
-            else:
-                logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
+        
+        if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
+            seeding_poly = gpd.read_file(self.seeding_shapefile)
+            seeding_poly['geometry'] = seeding_poly.geometry.buffer(.01)
+            new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
+            seeding_poly.to_file(new_seeding_shapefile)
+            self.seeding_shapefile = str(new_seeding_shapefile)
+            logger.info(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
+       # else:
+        #    seed_poly_path = self.seeding_shapefile
+        
+        
+        # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
+        if self.depth == True:
+            self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
+            self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time, 
+                                       terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
+            #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
+            self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
+            self.o.set_config('drift:vertical_mixing', True)
+        
+        # if simulation is 2D, simply seed particles over polygon
+        else:
+            self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time,
+                                       origin_marker=self.origin_marker, radius=seeding_radius) # 
+        
+        # run simulation and write to temporary file
+        #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
+        qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
+        temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.origin_marker}.nc' # probably not needed anymore
 
-            
-            if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
-                seeding_poly = gpd.read_file(self.seeding_shapefile)
-                seeding_poly['geometry'] = seeding_poly.geometry.buffer(.01)
-                new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
-                seeding_poly.to_file(new_seeding_shapefile)
-                self.seeding_shapefile = str(new_seeding_shapefile)
-                logger.info(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
-           # else:
-            #    seed_poly_path = self.seeding_shapefile
-            
-            
-            # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
-            if self.depth == True:
-                self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
-                self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time, 
-                                           terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
-                #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-                self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
-                self.o.set_config('drift:vertical_mixing', True)
-            
-            # if simulation is 2D, simply seed particles over polygon
-            else:
-                self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time,
-                                           origin_marker=self.origin_marker, radius=seeding_radius) # 
-            
-            # run simulation and write to temporary file
-            #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
-            qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
-            temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.origin_marker}.nc'
+        logger.info('running opendrift...')
+        now = datetime.now()
+        current_time = now.strftime("%H:%M:%S")
 
-            logger.info('running opendrift...')
-            now = datetime.now()
-            current_time = now.strftime("%H:%M:%S")
+        self.o.run(duration=duration, #end_time=end_time, 
+                   time_step=time_step, #time_step_output=timedelta(hours=24), 
+                   outfile=temp_outfile, 
+                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
-            self.o.run(duration=duration, #end_time=end_time, 
-                       time_step=time_step, #time_step_output=timedelta(hours=24), 
-                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+        elapsed = (T.time() - t_0)
+        logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
 
-            elapsed = (T.time() - t_0)
-            logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
+        if hasattr(self.o, 'discarded_readers'):
+            logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
 
-            if hasattr(self.o, 'discarded_readers'):
-                logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
+        #### A BIT OF POST-PROCESSING ####
+        logger.info('writing to netcdf...')
 
-            #### A BIT OF POST-PROCESSING ####
-            logger.info('writing to netcdf...')
+        _ps = xr.open_dataset(temp_outfile) # open temporary file
+        #_ps = self.o.result # writing this to netcdf gives strange error TypeError: Invalid value for attr 'dtype': <class 'numpy.int32'>.
+        #print('time len before processing', len(_ps.time))
 
-            _ps = xr.open_dataset(temp_outfile) # open temporary file
-            #print('time len before processing', len(_ps.time))
+        # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
+        ps = _ps.where(_ps.status>=0).ffill('time') 
+        #print('time len after ffill inactive', len(ps.time))
 
-            # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
-            ps = _ps.where(_ps.status>=0).ffill('time') 
-            #print('time len after ffill inactive', len(ps.time))
-
-            # write useful attributes
-            ps = ps.assign_attrs({'extent': self.extent, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
-                                  #'tseed': self.tseed.total_seconds(), 
-                                  'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': str(self.seeding_shapefile),
-                                  'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
+        # write useful attributes
+        ps = ps.assign_attrs({'extent': self.extent, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
+                              #'tseed': self.tseed.total_seconds(), 
+                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': str(self.seeding_shapefile),
+                              'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
 
 
-            ps.to_netcdf(str(file_path))
-            logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.")
+        #ps.to_netcdf(str(file_path))
+        #logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.")
 
         
         self.ds = ps
@@ -816,7 +822,8 @@ class PMAR(object):
         
         return use_value 
 
-    def assign_weight(self, weight=1):
+    # to deprecate
+    def _assign_weight(self, weight=1):
         """
         Add a weight variable to ds. If 
         """
@@ -851,7 +858,7 @@ class PMAR(object):
             weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
 
         if emission is not None:
-            self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
+            self.emission = emission * self.ds.tstep / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
             logger.info(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             weight = weight*self.emission
         
@@ -870,8 +877,10 @@ class PMAR(object):
 
         # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
         if assign is True:
-            self.ds = self.assign_weight(weight)
-            self.ds.to_netcdf(self.particle_path)
+            #self.ds = self.assign_weight(weight)
+            self.ds = self.ds.assign({'weight': (('trajectory', 'time'), weight.data)}) 
+            logger.info('updating weight variable in ds')
+            #self.ds.to_netcdf(self.particle_path)
 
         return weight
     
@@ -1042,7 +1051,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1065,9 +1074,32 @@ class PMAR(object):
         '''
         self.res = res
 
-        # this method runs its own cache 
-        self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, loglevel=loglevel)
+        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift)
 
+        logger.info(f'particle_path exists = {file_exists}, {file_path}')
+        
+        self.particle_path = str(file_path)
+
+        # if a file with that name already exists, simply import it  
+        if file_exists == True:
+            #ps = xr.open_mfdataset(file_path)
+            self.ds = self.get_ds
+            self.seeding_shapefile = self.ds.seeding_shapefile
+            self.poly_path = self.ds.poly_path
+            # add weight to ds 
+            # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
+            if use_path or emission or decay_coef != 0:
+                self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
+            
+            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') 
+
+        # otherwise, run requested simulation
+        else:
+            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, loglevel=loglevel)
+            self.ds.to_netcdf(str(file_path))
+            logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
+
+        
         # # create dataset where all outputs will be stored
         self.output = xr.Dataset()
 
@@ -1088,9 +1120,9 @@ class PMAR(object):
             ppi = self.ppi(use_path=use_path, emission=emission, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
 
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
+                   
 
             self.write_tiff(ppi, path=ppi_path)
-        
         #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
 
@@ -1118,7 +1150,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label='unity-use', emission=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
+    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of reps. 
     

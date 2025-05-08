@@ -22,7 +22,7 @@ class PMARCache(object):
             json.dump(kwargs,fi,default=str)
             
     def particle_cache(self, context, pressure, chemical_compound, seeding_shapefile, poly_path, pnum, start_time, duration_days, s_bounds, seeding_radius, beaching, z, tstep, hdiff, termvel, stokes_drift):
-        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'poly_path': poly_path, 'pnum': pnum, 'start_time': start_time.strftime("%Y-%m-%d"), 'duration_days': duration_days, 's_bounds': s_bounds, 'seeding_radius': seeding_radius, 'beaching': beaching, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'stokes_drift': stokes_drift}
+        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'poly_path': poly_path, 'pnum': pnum, 'start_time': start_time, 'duration_days': duration_days, 's_bounds': s_bounds, 'seeding_radius': seeding_radius, 'beaching': beaching, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'stokes_drift': stokes_drift}
         path_data_file = self.get_data_file('nc', **cache_key) # chiave della cache e nome del file
         self.set_metadata('nc', **cache_key) #TODO spostare
         logger.info('particle cache = '+str(cache_key))
