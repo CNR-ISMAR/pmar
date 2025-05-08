@@ -3,6 +3,7 @@ import xarray as xr
 from copy import deepcopy
 import cartopy.io.shapereader as shpreader
 import geopandas as gpd
+from rasterio.enums import Resampling
 
 def get_marine_polygon(basin=None):
     '''
