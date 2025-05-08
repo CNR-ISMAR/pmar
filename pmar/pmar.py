@@ -220,7 +220,7 @@ class PMAR(object):
         
         contexts = {'global': 
                         {'readers': 
-                         {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 25 Feb 2025
+                         {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
                           'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
                           'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
                           #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
@@ -363,9 +363,9 @@ class PMAR(object):
             else:
                 partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
                 ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
-                logger.error(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
+                logger.info(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
                 # if the run contained reps, ensure trajectories have unique IDs for convenience
-                logger.error(f'self.reps = {self.reps}')
+                logger.info(f'self.reps = {self.reps}')
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
             
             self.ds = ds
@@ -678,7 +678,7 @@ class PMAR(object):
 
             self.o.run(duration=duration, #end_time=end_time, 
                        time_step=time_step, #time_step_output=timedelta(hours=24), 
-                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness',])# 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                       outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
             elapsed = (T.time() - t_0)
             print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -1027,7 +1027,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label='unity-use', output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label='unity-use', emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1059,7 +1059,7 @@ class PMAR(object):
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius= seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius= seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         print(f'##################### ppi_exists = {ppi_exists}')
         print(f'##################### ppi_path = {ppi_path}')
         # calculate ppi
@@ -1067,7 +1067,7 @@ class PMAR(object):
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
         else:
-            ppi = self.ppi(use_path=use_path, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
+            ppi = self.ppi(use_path=use_path, emission=emission, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
 
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
 
@@ -1097,7 +1097,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label='unity-use', hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
+    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label='unity-use', emission=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of reps. 
     
@@ -1129,7 +1129,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         self.output = xr.Dataset()
         
@@ -1149,7 +1149,7 @@ class PMAR(object):
             
             pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
             
-            self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+            self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
             logger.warning(f'Done with rep #{n}.')
 
         #if use_path:
