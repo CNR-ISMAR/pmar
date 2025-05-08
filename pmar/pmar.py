@@ -540,14 +540,18 @@ class PMAR(object):
         
         
         file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, season=season, duration_days=duration_days, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, stokes_drift=stokes_drift)
-        
+
+        self.particle_path = str(file_path)
+
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             ps = xr.open_mfdataset(file_path)
-            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
+            self.seeding_shapefile = ps.seeding_shapefile
+            self.poly_path = ps.poly_path
+            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') 
 
         # otherwise, run requested simulation
-        elif file_exists == False:
+        else:
             
             # initialise OpenDrift object
             if self.pressure == 'oil':
@@ -719,8 +723,6 @@ class PMAR(object):
             logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.")
 
         
-        self.particle_path = str(file_path)
-
         self.ds = ps
         
         if 'qtemp' in locals():
@@ -841,7 +843,7 @@ class PMAR(object):
         #logger.info('done.')
         return normalized_weight
 
-    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=True):
+    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
         
         if use_path is not None:
             # extract value of use at starting position of each trajectory
@@ -869,6 +871,7 @@ class PMAR(object):
         # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
         if assign is True:
             self.ds = self.assign_weight(weight)
+            self.ds.to_netcdf(self.particle_path)
 
         return weight
     
@@ -1034,7 +1037,6 @@ class PMAR(object):
 
         #logger.info(path)
         r.rio.to_raster(path, nodata=0) 
-        #h.to_netcdf(path)
         
         logger.info(f'Wrote tiff to {path}.')
         pass
@@ -1073,11 +1075,11 @@ class PMAR(object):
             use_label = str(use_path).split('/')[-1][:10]
             
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
+        
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius= seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        logger.info(f'##################### ppi_exists = {ppi_exists}')
-        logger.info(f'##################### ppi_path = {ppi_path}')
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
         # calculate ppi
 
         if ppi_exists == True:
@@ -1088,8 +1090,11 @@ class PMAR(object):
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
 
             self.write_tiff(ppi, path=ppi_path)
+        
+        #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
+        #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
 
-        return self.output
+        pass
 
     
     def sum_reps(self, rep_path):
@@ -1150,31 +1155,31 @@ class PMAR(object):
         self.output = xr.Dataset()
         
         if ppi_exists == True:
-            logger.info('raster ppi file with these configurations already exists. see self.output')
+            logger.info('PPI with requested configurations found in cache.')
             self.output['ppi'] = rxr.open_rasterio(ppi_path)
-
-        for n in range(0, reps):
-            #print(f'Starting rep #{n+1}...')
-            start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
-            rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
+        else:
+            for n in range(0, reps):
+                #print(f'Starting rep #{n+1}...')
+                start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
+                rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
+                
+                logger.info(f'Starting rep #{n} with start_time = {rep_start_time}')
+                
+                rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
+                # this will have to go as an attribute in ds too, useful for plotting
+                
+                pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
+                
+                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+                logger.info(f'Done with rep #{n}.')
+    
+            #if use_path:
+            if reps>1:
+                rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif')
+                logger.info(f'############################## rep_ppi_path = {rep_ppi_path}')
+                self.output['ppi'] = ppi = self.sum_reps(rep_ppi_path)
             
-            logger.info(f'Starting rep #{n} with start_time = {rep_start_time}')
-            
-            rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
-            # this will have to go as an attribute in ds too, useful for plotting
-            
-            pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
-            
-            self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
-            logger.info(f'Done with rep #{n}.')
-
-        #if use_path:
-        if reps>1:
-            rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif')
-            logger.info(f'############################## rep_ppi_path = {rep_ppi_path}')
-            self.output['ppi'] = ppi = self.sum_reps(rep_ppi_path)
-        
-        self.write_tiff(self.output['ppi'], path=ppi_path)
+            self.write_tiff(self.output['ppi'], path=ppi_path)
         thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
         #print('DONE.')
