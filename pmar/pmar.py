@@ -46,7 +46,14 @@ from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
 from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon
 
-logger = logging.getLogger("PMAR")
+logger = logging.getLogger(__name__)#, level=logging.DEBUG)
+logger.setLevel(logging.DEBUG)
+sh = logging.StreamHandler()
+sf = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+sh.setFormatter(sf)
+logger.addHandler(sh)
+
+#logger.basicConfig(level=logging.DEBUG, filename='log.log', filemode='w')
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
@@ -165,7 +172,7 @@ class PMAR(object):
         self.study_area = None # this will substitude r_bounds 
         self.seeding_shapefile = seeding_shapefile # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
         self.seed_within_bounds = None # this will substitude s_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
-
+        
         # This should be a separate method
         pres_list = ['general', 'microplastic', 'bacteria']
         pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_coef'], 
@@ -306,7 +313,12 @@ class PMAR(object):
             poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
             logger.info(f'making new polygon_grid using r_bounds = {r_bounds}')
         else:
-            poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+            try:
+                poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+            except:
+                poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
+                self.poly_path = self.ds.poly_path
+                logger.debug('reading poly_path from ds')
         
         xmin, ymin, xmax, ymax = poly.total_bounds
         
@@ -336,11 +348,11 @@ class PMAR(object):
             
         #print('polygon_grid: done.')
         self.res = res
-        print(f'updated self.res = {self.res}')
+        logger.info(f'updated self.res = {self.res}')
         return self._polygon_grid
 
     def raster_grid(self, res=None, r_bounds=None):
-        logger.warning(f'rasterizing grid with extent = {r_bounds}')
+        logger.info(f'rasterizing grid with extent = {r_bounds}')
         grid = self.polygon_grid(res=res, r_bounds=r_bounds)
         grid['weight'] = 1
         _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
@@ -354,9 +366,9 @@ class PMAR(object):
         # if they don't match, i am probably only looking at the last rep. 
         try:
             self.ds
-            print('get_ds: returning previously calculated ds.')
+            logger.info('get_ds: returning previously calculated ds.')
         except:
-            print('get_ds: retrieving ds from particle_path.')
+            logger.info('get_ds: retrieving ds from particle_path.')
             if type(self.particle_path) is str or len(self.particle_path) == 1:
                 ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
             
@@ -369,7 +381,7 @@ class PMAR(object):
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
             
             self.ds = ds
-            print('get_ds: done.')
+            logger.info('get_ds: done.')
 
         return self.ds
 
@@ -380,7 +392,7 @@ class PMAR(object):
         Sometimes opendrift runs end early because e.g. all particles have beached, resulting in reps with different time lengths. This method finds the maximum time lenght of all reps.
         '''
         lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_path])
-        print(f'giving all datasets the same time length of {lens} tsteps...')
+        logger.info(f'giving all datasets the same time length of {lens} tsteps...')
         return lens.max()
 
     def _preprocess(self, ds, correct_len):
@@ -532,7 +544,7 @@ class PMAR(object):
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             ps = xr.open_mfdataset(file_path)
-            logger.warning(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
+            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') ### this might be irrelevant with cachedir
 
         # otherwise, run requested simulation
         elif file_exists == False:
@@ -596,7 +608,7 @@ class PMAR(object):
                 self.o.init_transfer_rates()
                                 
 
-            print('adding landmask...')
+            logger.info('adding landmask...')
             # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
             shpfilename = shpreader.natural_earth(resolution='10m',
                                     category='cultural',
@@ -606,7 +618,7 @@ class PMAR(object):
             self.o.add_reader([reader_landmask])
             self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
             
-            print('adding readers...')            
+            logger.info('adding readers...')            
             readers = []
             for var in self.context['readers']:
                 readers.append(Reader(dataset_id=self.context['readers'][var]))
@@ -618,7 +630,7 @@ class PMAR(object):
             #self.o.set_config('drift:wind_uncertainty', 1)
 
             ##### SEEDING #####
-            print('seeding particles...')
+            logger.info('seeding particles...')
             np.random.seed(None)            
 
             # poly = gpd.read_file(self.poly_path)
@@ -672,7 +684,7 @@ class PMAR(object):
             qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
             temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.origin_marker}.nc'
 
-            print('running opendrift...')
+            logger.info('running opendrift...')
             now = datetime.now()
             current_time = now.strftime("%H:%M:%S")
 
@@ -681,13 +693,13 @@ class PMAR(object):
                        outfile=temp_outfile, export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
             elapsed = (T.time() - t_0)
-            print("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
+            logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
 
             if hasattr(self.o, 'discarded_readers'):
                 logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
 
             #### A BIT OF POST-PROCESSING ####
-            print('writing to netcdf...')
+            logger.info('writing to netcdf...')
 
             _ps = xr.open_dataset(temp_outfile) # open temporary file
             #print('time len before processing', len(_ps.time))
@@ -704,7 +716,7 @@ class PMAR(object):
 
 
             ps.to_netcdf(str(file_path))
-            print(f"done. NetCDF file '{str(file_path)}' created successfully.")
+            logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.")
 
         
         self.particle_path = str(file_path)
@@ -716,7 +728,7 @@ class PMAR(object):
             os.rmdir(qtemp.name)
 
         
-        logger.error(f'particle simulation lat = {ps.lat.shape}, lon={ps.lon.shape}, time={ps.time.shape}')
+        logger.info(f'particle simulation lat = {ps.lat.shape}, lon={ps.lon.shape}, time={ps.time.shape}')
 
         
         pass
@@ -737,8 +749,8 @@ class PMAR(object):
             traj = ds.trajectory.where(ds.isel(time=-1).status==available_status[status]).dropna('trajectory').data
             filtered_ds = ds.sel(trajectory=traj)
         except:
-            print("Unrecognised status. Status must be one of 'active', 'stranded', 'seafloor'. No filtering by status was carried out.")    
-        print(f'Rasterizing only {status} particles.')
+            logger.warning("Unrecognised status. Status must be one of 'active', 'stranded', 'seafloor'. No filtering by status was carried out.")    
+        logger.info(f'Rasterizing only {status} particles.')
         return filtered_ds
 
     def interpolate_time(self, new_timestep):
@@ -753,7 +765,7 @@ class PMAR(object):
         new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=new_timestep)) #new time variables used for interpolation
         ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
         
-        print(f'Interpolating time on ds. New timestep = {new_timestep} hours...')
+        logger.info(f'Interpolating time on ds. New timestep = {new_timestep} hours...')
         return ds
     
     def decay_rate(self, k):
@@ -784,7 +796,7 @@ class PMAR(object):
         r_bounds : list, optional
             Spatial bounds for computation of raster over a subregion, written as [x1,y1,x2,y2]. Default is None (bounds are taken from self.)
         '''
-        print('applying use weight...')
+        logger.info('applying use weight...')
         grid = self.polygon_grid(res, r_bounds=r_bounds)
         poly_bounds = grid.total_bounds
         
@@ -797,8 +809,8 @@ class PMAR(object):
 
         use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
         
-        print(f'number of trajectories with use value = 0 {use_value.where(use_value==0).count().data}')
-        print(f'number of trajectories with use value != 0 {use_value.where(use_value!=0).count().data}')
+        logger.info(f'number of trajectories without use value  {use_value.where(use_value==0).count().data}')
+        logger.info(f'number of trajectories with use value  {use_value.where(use_value!=0).count().data}')
         
         return use_value 
 
@@ -810,25 +822,26 @@ class PMAR(object):
         
         ds = self.get_ds
 
-        print(f'Adding weight variable to ds...')
+        logger.info(f'Adding weight variable to ds...')
         w = np.ones_like(self.ds.lon)*weight # longitude is always going to be available as a variable, so taking it as reference for the shape
         ds = ds.assign({'weight': (('trajectory', 'time'), w.data)}) 
+        logger.info('updating weight variable in ds')
         
         return ds
 
     def normalize_weight(self, weight, res, r_bounds=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
         self.ds = self.get_bin_n(res=res, t=0, r_bounds=r_bounds)
-        print('weight_by_bin...')
+        logger.info('weight_by_bin...')
         weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0)
-        print('done.')
+        #logger.info('done.')
         counts_per_bin = self.ds.isel(time=0).bin_n_t0.groupby(self.ds.isel(time=0).bin_n_t0).count()
-        print('counts_per_bin...')
+        logger.info('counts_per_bin...')
         normalized_weight = weight_by_bin/counts_per_bin 
-        print('done.')
+        #logger.info('done.')
         return normalized_weight
 
-    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
+    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=True):
         
         if use_path is not None:
             # extract value of use at starting position of each trajectory
@@ -837,12 +850,12 @@ class PMAR(object):
 
         if emission is not None:
             self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
-            logger.warning(f'Converted emission from {emission} per day to {self.emission} per timestep.')
+            logger.info(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             weight = weight*self.emission
         
         if decay_coef != 0:
         # decay rate. default is no decay, but this is still useful to give weight the correct shape
-            print(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
+            logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
             y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
             weight = weight*y
 
@@ -851,7 +864,7 @@ class PMAR(object):
         
         if normalize is True:
             weight = self.normalize_weight(weight, res=res, r_bounds=r_bounds)
-            print('weight normalized by number of particles in bin at t0.')
+            logger.info('weight normalized by number of particles in bin at t0.')
 
         # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
         if assign is True:
@@ -881,16 +894,16 @@ class PMAR(object):
         func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
         #print('bin_n ufunc')
         try:
-            print(f'calculating bin number at timestep {t}')
             ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
-            print('bin_n_t0 done.')
+            logger.info(f'calculated bin number at timestep {t}')
+            #print('bin_n_t0 done.')
         except:
-            logger.warning(f'Calculating bin_n at all timesteps {t}.')
+            logger.info(f'Calculating bin_n at all timesteps {t}.')
             ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
             
         return ds
 
-    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=False, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
+    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
         '''
         "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
         from Stanev et al., 2019
@@ -912,7 +925,7 @@ class PMAR(object):
         ybin = self._y_e
 
         weights = self.set_weights(res=res, r_bounds=r_bounds, weight=weight, normalize=normalize, use_path=use_path, emission=emission, decay_coef=decay_coef, assign=assign)
-        print('set_weights done.')
+        logger.info('set_weights done.')
         
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
         h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=dim, weights=weights.fillna(0.), block_size=block_size) 
@@ -959,7 +972,7 @@ class PMAR(object):
             
         #weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
 
-        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, block_size=len(self.ds.time), use_path=use_path, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
+        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
@@ -1019,15 +1032,15 @@ class PMAR(object):
             path = str(path).replace('.tif', f'_use-{description}.tif')
             #path = str(path).replace('.tif', f'_use-{description}.nc') # FOR DEBUGGING
 
-        print(path)
+        #logger.info(path)
         r.rio.to_raster(path, nodata=0) 
         #h.to_netcdf(path)
         
-        print(f'Wrote tiff to {path}.')
+        logger.info(f'Wrote tiff to {path}.')
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label='unity-use', emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, decay_coef=0, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1055,13 +1068,16 @@ class PMAR(object):
 
         # # create dataset where all outputs will be stored
         self.output = xr.Dataset()
-        
+
+        if use_label is None and use_path is not None:
+            use_label = str(use_path).split('/')[-1][:10]
+            
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
         ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius= seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        print(f'##################### ppi_exists = {ppi_exists}')
-        print(f'##################### ppi_path = {ppi_path}')
+        logger.info(f'##################### ppi_exists = {ppi_exists}')
+        logger.info(f'##################### ppi_path = {ppi_path}')
         # calculate ppi
 
         if ppi_exists == True:
@@ -1134,7 +1150,7 @@ class PMAR(object):
         self.output = xr.Dataset()
         
         if ppi_exists == True:
-            print('raster ppi file with these configurations already exists. see self.output')
+            logger.info('raster ppi file with these configurations already exists. see self.output')
             self.output['ppi'] = rxr.open_rasterio(ppi_path)
 
         for n in range(0, reps):
@@ -1142,7 +1158,7 @@ class PMAR(object):
             start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
             rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
             
-            logger.warning(f'Starting rep #{n} with start_time = {rep_start_time}')
+            logger.info(f'Starting rep #{n} with start_time = {rep_start_time}')
             
             rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
             # this will have to go as an attribute in ds too, useful for plotting
@@ -1150,18 +1166,18 @@ class PMAR(object):
             pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
             
             self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
-            logger.warning(f'Done with rep #{n}.')
+            logger.info(f'Done with rep #{n}.')
 
         #if use_path:
         if reps>1:
             rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif')
-            print(f'############################## rep_ppi_path = {rep_ppi_path}')
+            logger.info(f'############################## rep_ppi_path = {rep_ppi_path}')
             self.output['ppi'] = ppi = self.sum_reps(rep_ppi_path)
         
         self.write_tiff(self.output['ppi'], path=ppi_path)
         thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
-        print('DONE.')
+        #print('DONE.')
         # else:
         #     print('No use_path provided. Returning residence time only.')
 
