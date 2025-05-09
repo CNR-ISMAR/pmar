@@ -298,24 +298,18 @@ class PMAR(object):
         Create grid of given resolution (res) and intersect it with poly_path.
         '''
 
-        # if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
-        #     print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
-        # else:
-
-        if self._polygon_grid is not None:
-            _poly_res = np.round((self._polygon_grid.length/4).values,8)
-            _poly_bounds = np.round(self._polygon_grid.total_bounds,8)
-            if np.all(_poly_res == res) and np.all(_poly_bounds == r_bounds): # should check crs too
-                logger.info(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and r_bounds = {r_bounds} = {self._polygon_grid.total_bounds} already calculated.')
-
+        # todo: check crs matches too
+        if self._polygon_grid is not None and np.all(np.round((self._polygon_grid.length/4).values,8) == res) and np.all(np.round(self._polygon_grid.total_bounds,8) == r_bounds):
+            logger.debug(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and r_bounds = {r_bounds} = {self._polygon_grid.total_bounds} already calculated.')
+                
         else:        
-            logger.debug(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
+            logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
             #res = self.res 
             crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
             
             if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
                 poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
-                logger.info(f'making new polygon_grid using r_bounds = {r_bounds}')
+                logger.debug(f'making new polygon_grid using r_bounds = {r_bounds}')
             else:
                 try:
                     poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
@@ -353,7 +347,7 @@ class PMAR(object):
             #print('polygon_grid: done.')
             self.res = res
             logger.info(f'updated self.res = {self.res}')
-            
+                
         return self._polygon_grid
 
     def raster_grid(self, res=None, r_bounds=None):
