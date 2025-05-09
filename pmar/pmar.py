@@ -46,14 +46,13 @@ from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
 from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon
 
-logger = logging.getLogger(__name__)#, level=logging.DEBUG)
+
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 sh = logging.StreamHandler()
 sf = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 sh.setFormatter(sf)
 logger.addHandler(sh)
-
-#logger.basicConfig(level=logging.DEBUG, filename='log.log', filemode='w')
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
@@ -130,6 +129,7 @@ class PMAR(object):
         depth : bool, optional
             boolean stating whether particle simulation is 2D (depth==False) or 3D (depth==True). Default is False
         """
+
 
         Path(basedir).mkdir(parents=True, exist_ok=True)
         self.uv_path = uv_path
@@ -292,63 +292,68 @@ class PMAR(object):
             raise ValueError('polygon_grid needs to be called before using this method')
         return self._y_e
 
-    #@property
-    #def polygon_grid(self):
-     #   return self._polygon_grid
 
-    #@polygon_grid.setter
     def polygon_grid(self, res, r_bounds=None):
         '''
         Create grid of given resolution (res) and intersect it with poly_path.
         '''
-        
+
         # if res == self.res and self._polygon_grid is not None: # should test if r_bounds matches too!
         #     print(f'polygon_grid: _polygon_grid was previously calculated with resolution = {self.res}.')
         # else:
-        logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
-        #res = self.res 
-        crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
-        
-        if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
-            poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
-            logger.info(f'making new polygon_grid using r_bounds = {r_bounds}')
-        else:
-            try:
-                poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
-            except:
-                poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
-                self.poly_path = self.ds.poly_path
-                logger.debug('reading poly_path from ds')
-        
-        xmin, ymin, xmax, ymax = poly.total_bounds
-        
-        cols = list(np.arange(xmin, xmax + res, res))               
-        rows = list(np.arange(ymin, ymax + res, res)) 
-        
-        polygons = [] 
-        #print('polygon_grid: starting for loop...')
-        for y in rows[:-1]:                
-            for x in cols[:-1]:    
-                polygons.append(Polygon([(x,y),
-                                         (x+res, y),
-                                         (x+res, y+res),
-                                         (x, y+res)]))
-        #print('polygon_grid: for loop done!')
-        
-        grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
 
-        #print('intersecting grid with poly')
-        intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
-        self._polygon_grid = intersect
-        
-        self._x_e = np.array(cols) # outer edge coordinates
-        self._y_e = np.array(rows)
-        self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
-        self._y_c = np.unique(self._polygon_grid.centroid.y.values)
+        if self._polygon_grid is not None:
+            _poly_res = np.round((self._polygon_grid.length/4).values,8)
+            _poly_bounds = np.round(self._polygon_grid.total_bounds,8)
+            if np.all(_poly_res == res) and np.all(_poly_bounds == r_bounds): # should check crs too
+                logger.info(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and r_bounds = {r_bounds} = {self._polygon_grid.total_bounds} already calculated.')
+
+        else:        
+            logger.debug(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
+            #res = self.res 
+            crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
             
-        #print('polygon_grid: done.')
-        self.res = res
-        logger.info(f'updated self.res = {self.res}')
+            if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
+                poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
+                logger.info(f'making new polygon_grid using r_bounds = {r_bounds}')
+            else:
+                try:
+                    poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+                except:
+                    poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
+                    self.poly_path = self.ds.poly_path
+                    logger.debug('reading poly_path from ds')
+            
+            xmin, ymin, xmax, ymax = poly.total_bounds
+            
+            cols = list(np.arange(xmin, xmax + res, res))               
+            rows = list(np.arange(ymin, ymax + res, res)) 
+            
+            polygons = [] 
+            #print('polygon_grid: starting for loop...')
+            for y in rows[:-1]:                
+                for x in cols[:-1]:    
+                    polygons.append(Polygon([(x,y),
+                                             (x+res, y),
+                                             (x+res, y+res),
+                                             (x, y+res)]))
+            #print('polygon_grid: for loop done!')
+            
+            grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
+    
+            #print('intersecting grid with poly')
+            intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
+            self._polygon_grid = intersect
+            
+            self._x_e = np.array(cols) # outer edge coordinates
+            self._y_e = np.array(rows)
+            self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
+            self._y_c = np.unique(self._polygon_grid.centroid.y.values)
+                
+            #print('polygon_grid: done.')
+            self.res = res
+            logger.info(f'updated self.res = {self.res}')
+            
         return self._polygon_grid
 
     def raster_grid(self, res=None, r_bounds=None):
@@ -817,8 +822,8 @@ class PMAR(object):
 
         use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
         
-        logger.info(f'number of trajectories without use value  {use_value.where(use_value==0).count().data}')
-        logger.info(f'number of trajectories with use value  {use_value.where(use_value!=0).count().data}')
+        #logger.info(f'number of trajectories without use value  {use_value.where(use_value==0).count().data}')
+        logger.info(f'number of trajectories with non-zero use value  {use_value.where(use_value!=0).count().data}/{len(self.ds.trajectory)}')
         
         return use_value 
 
@@ -1082,7 +1087,7 @@ class PMAR(object):
 
         # if a file with that name already exists, simply import it  
         if file_exists == True:
-            #ps = xr.open_mfdataset(file_path)
+            logger.info(f'Opendrift file with these configurations already exists within {self.basedir}. Importing.') 
             self.ds = self.get_ds
             self.seeding_shapefile = self.ds.seeding_shapefile
             self.poly_path = self.ds.poly_path
@@ -1091,7 +1096,6 @@ class PMAR(object):
             if use_path or emission or decay_coef != 0:
                 self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
             
-            logger.info(f'Opendrift file with these configurations already exists within {self.basedir} and has been imported.') 
 
         # otherwise, run requested simulation
         else:
