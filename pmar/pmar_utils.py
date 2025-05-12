@@ -63,3 +63,25 @@ def traj_distinct(bin_n, weight):
         if bin_n[t] == bin_n[t-1]:
             w[t] = 0
     return w
+    
+
+def custom_plotfunc(ds, fig, tt, *args, **kwargs):
+    '''
+    For pmar.animate. WIP.
+    it works but it writes a blank video to mp4.
+    '''
+    
+    fig = plt.figure()
+    ax = plt.axes(projection=cartopy.crs.PlateCarree())
+    ax.coastlines('10m', zorder=12, color='k', linewidth=.7)
+    ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2)
+    ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
+    gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
+    #levels=np.array([1,10,100,1000])
+    gl.top_labels = False
+    gl.right_labels = False
+
+    # Colorlimits need to be fixed or your video is going to cause seizures.
+    ds.isel(time=tt).plot(ax=ax, cmap=spectral_r, vmin=0, vmax=ds.max())
+    ax.set_title('');
+    return None, None
