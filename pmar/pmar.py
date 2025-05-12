@@ -47,12 +47,12 @@ from pmar.pmar_cache import PMARCache
 from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-sh = logging.StreamHandler()
-sf = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-sh.setFormatter(sf)
-logger.addHandler(sh)
+logger = logging.getLogger('pmar')
+#logger.setLevel(logging.DEBUG)
+# sh = logging.StreamHandler()
+# sf = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+# sh.setFormatter(sf)
+# logger.addHandler(sh)
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
@@ -100,7 +100,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='general', chemical_compound=None, basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None):
+    def __init__(self, context, pressure='general', chemical_compound=None, basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -172,6 +172,22 @@ class PMAR(object):
         self.study_area = None # this will substitude r_bounds 
         self.seeding_shapefile = seeding_shapefile # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
         self.seed_within_bounds = None # this will substitude s_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
+
+        self.loglevel = loglevel
+        
+        # set up logger 
+        logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
+        datefmt = '%H:%M:%S'        
+        sh = logging.StreamHandler()
+        sf = logging.Formatter(logformat)
+        sh.setFormatter(sf)
+
+        if (logger.hasHandlers()):
+            logger.handlers.clear()        
+        logger.addHandler(sh)
+        if loglevel < 10:  # 0 is NOTSET, giving no output
+            loglevel = 10
+        logger.setLevel(loglevel)
         
         # This should be a separate method
         pres_list = ['general', 'microplastic', 'bacteria']
@@ -206,8 +222,8 @@ class PMAR(object):
             #    self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
            # else:
            #     pass
-            
 
+        
         # this (if still needed?) should be a separate method
         # if particle_path is given, retrieve number of reps and load ds
         if self.particle_path is not None: 
@@ -235,7 +251,8 @@ class PMAR(object):
                           'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                          },
                         'extent': [-180, -80, 179.92, 90],
-                        'polygon': get_marine_polygon()},
+                        'polygon': None# get_marine_polygon()
+                        },
                         
                         'med': 
                         {'readers':
@@ -461,7 +478,7 @@ class PMAR(object):
         else:
             return poly
     
-    def get_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, loglevel=40):
+    def get_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, s_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):#, loglevel=40):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -558,11 +575,11 @@ class PMAR(object):
             
         # initialise OpenDrift object
         if self.pressure == 'oil':
-            self.o = OpenOil(loglevel=loglevel)
+            self.o = OpenOil(loglevel=self.loglevel)
         elif self.pressure in ['chemical', 'metal']:
-            self.o = ChemicalDrift(loglevel=loglevel)
+            self.o = ChemicalDrift(loglevel=self.loglevel)
         else:
-            self.o = OceanDrift(loglevel=loglevel) 
+            self.o = OceanDrift(loglevel=self.loglevel) 
             
         
         # some OpenDrift configurations
@@ -657,17 +674,18 @@ class PMAR(object):
             lat = self.extent[1::2]
             self.make_poly(lon, lat, crs=crs, write=True)
             self.seeding_shapefile = self.poly_path
+            logger.debug(f'writing new seeding shapefile to {self.seeding_shapefile}')
         else:
             logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
 
-        
+        # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
         if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
             seeding_poly = gpd.read_file(self.seeding_shapefile)
-            seeding_poly['geometry'] = seeding_poly.geometry.buffer(.01)
+            seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
             new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
             seeding_poly.to_file(new_seeding_shapefile)
             self.seeding_shapefile = str(new_seeding_shapefile)
-            logger.info(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
+            logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
        # else:
         #    seed_poly_path = self.seeding_shapefile
         
@@ -808,12 +826,12 @@ class PMAR(object):
         poly_bounds = grid.total_bounds
         
         _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
-
         gr = self.raster_grid(res=res, r_bounds=r_bounds)
         
         use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
         use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
-
+        self.use = use
+        
         use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
         
         #logger.info(f'number of trajectories without use value  {use_value.where(use_value==0).count().data}')
@@ -983,7 +1001,7 @@ class PMAR(object):
             
         #weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
 
-        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
+        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
@@ -1050,7 +1068,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, loglevel=40, make_dt=True, make_td=True):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, make_dt=True, make_td=True):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1076,7 +1094,7 @@ class PMAR(object):
         file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
-        
+        logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
         self.particle_path = str(file_path)
 
         # if a file with that name already exists, simply import it  
@@ -1093,7 +1111,7 @@ class PMAR(object):
 
         # otherwise, run requested simulation
         else:
-            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, loglevel=loglevel)
+            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff)
             self.ds.to_netcdf(str(file_path))
             logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
 
@@ -1148,7 +1166,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, loglevel=40, make_dt=True, make_td=True):
+    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of reps. 
     
@@ -1216,7 +1234,7 @@ class PMAR(object):
         # else:
         #     print('No use_path provided. Returning residence time only.')
 
-        pass
+        passs
         
     
     def plot(self, raster, title=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=cartopy.crs.epsg(3857), transform=cartopy.crs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, savepng=None):
@@ -1331,7 +1349,7 @@ class PMAR(object):
         return fig, ax
 
     
-    def scatter(self, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='rainbow', coastres='10m', proj=cartopy.crs.epsg(3857), dpi=120, figsize=[10,7], rivers=False, save_to=None):
+    def scatter(self, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='rainbow', coastres='10m', proj=cartopy.crs.PlateCarree(), transform=None, dpi=120, figsize=[10,7], rivers=False, save_to=None):
         """
         Visualise particle trajectories over time [days elapsed], defined by age_seconds. 
         
@@ -1403,7 +1421,7 @@ class PMAR(object):
         gl.top_labels = False
         gl.right_labels = False    
 
-        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha, transform=cartopy.crs.PlateCarree())
+        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha, transform=transform)
         cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
         cbar = plt.colorbar(im, cax=cax)
         cbar.set_label(cbar_label, rotation=90)
@@ -1429,9 +1447,11 @@ class PMAR(object):
     
     def animate(self):
         """
-        WIP. Histogram animation using xmovie
+        WIP. Histogram animation using xmovie.
+        import custom_plotfunc from pmar_utils.
         
         """
+        
         
         pass
 
