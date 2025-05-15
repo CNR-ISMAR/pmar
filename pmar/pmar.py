@@ -137,12 +137,13 @@ class PMAR(object):
         self.mld_path = mld_path 
         self.bathy_path = bathy_path 
         self.basedir = Path(basedir)
-        self.particle_path = particle_path # i can import an existing particle_path
+        if particle_path is None:
+            self.particle_path = [] # i can import an existing particle_path
         #self.ds = None. commented otherwise try: self.ds except: does not work
         self.o = None
         self.poly_path = poly_path 
 #        self.raster = None unused
-        self.seeding_id = 0
+        self.seeding_id = None
         #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
@@ -169,6 +170,7 @@ class PMAR(object):
         self.r_bounds = None
         self.res = None
         self.ds = None
+        self.ppi_path = []
         self.study_area = None # this will substitude r_bounds 
         self.seeding_shapefile = seeding_shapefile # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
         self.seed_within_bounds = None # this will substitude s_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
@@ -207,6 +209,7 @@ class PMAR(object):
             pass
 
         # if a path to a shapefile is given to be used for seeding, read it and save it in the lpt_output/polygons dir
+        # why save it locally????
         if poly_path is not None: 
             Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
             poly = gpd.read_file(poly_path).to_crs('epsg:4326')
@@ -226,11 +229,10 @@ class PMAR(object):
         
         # this (if still needed?) should be a separate method
         # if particle_path is given, retrieve number of seedings and load ds
-        if self.particle_path is not None: 
-
             # gather number of seedings from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
-            if type(self.particle_path) is list: 
-                self.seedings = len(particle_path)
+        if type(self.particle_path) is list: 
+                if self.particle_path:
+                    self.seedings = len(particle_path)
                 
 
     def get_context(self, context):
@@ -328,12 +330,13 @@ class PMAR(object):
                 poly = self.make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]], write=False).to_crs('epsg:4326')#.buffer(distance=res*3)
                 logger.debug(f'making new polygon_grid using r_bounds = {r_bounds}')
             else:
-                try:
-                    poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
-                except:
-                    poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
-                    self.poly_path = self.ds.poly_path
-                    logger.debug('reading poly_path from ds')
+                logger.error('PLEASE PROVIDE R_BOUNDS')
+                # try:
+                #     poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
+                # except:
+                #     poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
+                #     self.poly_path = self.ds.poly_path
+                #     logger.debug('reading poly_path from ds')
             
             xmin, ymin, xmax, ymax = poly.total_bounds
             
@@ -573,11 +576,11 @@ class PMAR(object):
             
         # initialise OpenDrift object
         if self.pressure == 'oil':
-            self.o = OpenOil(loglevel=self.loglevel)
+            self.o = OpenOil(loglevel=40)#self.loglevel)
         elif self.pressure in ['chemical', 'metal']:
-            self.o = ChemicalDrift(loglevel=self.loglevel)
+            self.o = ChemicalDrift(loglevel=40)#=self.loglevel)
         else:
-            self.o = OceanDrift(loglevel=self.loglevel) 
+            self.o = OceanDrift(loglevel=40)#self.loglevel) 
             
         
         # some OpenDrift configurations
@@ -736,8 +739,9 @@ class PMAR(object):
         # write useful attributes
         ps = ps.assign_attrs({'extent': self.extent, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
                               #'tseed': self.tseed.total_seconds(), 
-                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': str(self.seeding_shapefile),
-                              'poly_path': str(self.poly_path), 'opendrift_log': str(self.o)}) 
+                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': self.seeding_shapefile,
+                              #'poly_path': self.poly_path, 
+                              'opendrift_log': str(self.o)}) 
 
 
         #ps.to_netcdf(str(file_path))
@@ -1089,18 +1093,20 @@ class PMAR(object):
         '''
         self.res = res
 
-        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, poly_path=self.poly_path, pnum=pnum, start_time=start_time, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift)
+        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, pnum=pnum, start_time=start_time, duration_days=duration, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
-        self.particle_path = str(file_path)
-
+        #self.particle_path = str(file_path)
+        self.particle_path.append(file_path) 
+        
         # if a file with that name already exists, simply import it  
         if file_exists == True:
             logger.info(f'Opendrift file with these configurations already exists within {self.basedir}. Importing.') 
-            self.ds = self.get_ds
-            self.seeding_shapefile = self.ds.seeding_shapefile
-            self.poly_path = self.ds.poly_path
+            #self.particle_path.append(file_path)
+            #self.ds = self.get_ds
+            self.seeding_shapefile = xr.open_dataset(self.particle_path[-1]).seeding_shapefile #take only last particle path
+            #self.poly_path = self.ds.poly_path
             # add weight to ds 
             # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
             if use_path or emission or decay_coef != 0:
@@ -1124,7 +1130,10 @@ class PMAR(object):
         
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+            
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        self.ppi_path.append(ppi_path)
+        
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
         # calculate ppi
 
@@ -1198,9 +1207,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-
-        self.ppi_path = []
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         
@@ -1227,13 +1234,14 @@ class PMAR(object):
     
             #if use_path:
             if seedings>1:
-                rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
-                logger.debug(f'rep_ppi_path = {rep_ppi_path}')
-                self.output['ppi'] = ppi = self.sum_seedings(rep_ppi_path)
+                #rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
+                logger.debug(f'ppi_path = {self.ppi_path}')
+                self.output['ppi'] = ppi = self.sum_seedings(self.ppi_path)
             
             self.write_tiff(self.output['ppi'], path=ppi_path)
         thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
+        self.ds = self.get_ds
         #print('DONE.')
         # else:
         #     print('No use_path provided. Returning residence time only.')
