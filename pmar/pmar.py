@@ -142,7 +142,7 @@ class PMAR(object):
         self.o = None
         self.poly_path = poly_path 
 #        self.raster = None unused
-        self.origin_marker = 0
+        self.seeding_id = 0
         #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
@@ -692,7 +692,7 @@ class PMAR(object):
         if self.depth == True:
             self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
             self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time, 
-                                       terminal_velocity=termvel, z=z, origin_marker=self.origin_marker, radius=seeding_radius)
+                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
             #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
             self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
             self.o.set_config('drift:vertical_mixing', True)
@@ -700,12 +700,12 @@ class PMAR(object):
         # if simulation is 2D, simply seed particles over polygon
         else:
             self.o.seed_from_shapefile(shapefile=str(self.seeding_shapefile), number=pnum, time=start_time,
-                                       origin_marker=self.origin_marker, radius=seeding_radius) # 
+                                       origin_marker=self.seeding_id, radius=seeding_radius) # 
         
         # run simulation and write to temporary file
         #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
         qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
-        temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.origin_marker}.nc' # probably not needed anymore
+        temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.seeding_id}.nc' # probably not needed anymore
 
         logger.info('running opendrift...')
         now = datetime.now()
@@ -1192,6 +1192,8 @@ class PMAR(object):
         
         '''
 
+        self.seedings = seedings
+        
         ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
 
         self.ppi_cache = PMARCache(ppi_output_dir)
@@ -1207,13 +1209,15 @@ class PMAR(object):
             self.output['ppi'] = rxr.open_rasterio(ppi_path)
         else:
             for n in range(0, seedings):
-                #print(f'Starting rep #{n+1}...')
+
+                self.seeding_id = n
+                
                 start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
                 rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
                 
-                logger.info(f'Starting rep #{n} with start_time = {rep_start_time}')
+                logger.info(f'Starting rep #{self.seeding_id} with start_time = {rep_start_time}')
                 
-                rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
+                #rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
                 # this will have to go as an attribute in ds too, useful for plotting
                 
                 pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
@@ -1224,7 +1228,7 @@ class PMAR(object):
             #if use_path:
             if seedings>1:
                 rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
-                logger.info(f'############################## rep_ppi_path = {rep_ppi_path}')
+                logger.debug(f'rep_ppi_path = {rep_ppi_path}')
                 self.output['ppi'] = ppi = self.sum_seedings(rep_ppi_path)
             
             self.write_tiff(self.output['ppi'], path=ppi_path)
