@@ -100,7 +100,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='general', chemical_compound=None, basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
+    def __init__(self, context, pressure='generic', chemical_compound=None, basedir='lpt_output', localdatadir = None, seeding_shapefile = None, poly_path = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -155,7 +155,7 @@ class PMAR(object):
         self.chemical_compound = chemical_compound
         self.localdatadir = localdatadir
         self.particle_status = None
-        self.reps = 1
+        self.seedings = 1
         self.tshift = None
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
@@ -168,7 +168,7 @@ class PMAR(object):
         self.weight = None
         self.r_bounds = None
         self.res = None
-
+        self.ds = None
         self.study_area = None # this will substitude r_bounds 
         self.seeding_shapefile = seeding_shapefile # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
         self.seed_within_bounds = None # this will substitude s_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
@@ -225,12 +225,12 @@ class PMAR(object):
 
         
         # this (if still needed?) should be a separate method
-        # if particle_path is given, retrieve number of reps and load ds
+        # if particle_path is given, retrieve number of seedings and load ds
         if self.particle_path is not None: 
 
-            # gather number of reps from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
+            # gather number of seedings from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
             if type(self.particle_path) is list: 
-                self.reps = len(particle_path)
+                self.seedings = len(particle_path)
                 
 
     def get_context(self, context):
@@ -377,13 +377,14 @@ class PMAR(object):
 
     @property
     def get_ds(self):
-        # this doesnt actually work with reps, because self.ds always exists, but then it is only the last rep.
+        # this doesnt actually work with seedings, because self.ds always exists, but then it is only the last rep.
         # should discriminate e.g. by comparing self.ptot with self.ds.trajectory.
         # if they don't match, i am probably only looking at the last rep. 
-        try:
-            self.ds
+        #try:
+         #   self.ds
             #logger.info('get_ds: returning previously calculated ds.')
-        except:
+        #except:
+        if not self.ds:
             logger.info('get_ds: retrieving ds from particle_path.')
             if type(self.particle_path) is str or len(self.particle_path) == 1:
                 ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
@@ -391,16 +392,13 @@ class PMAR(object):
             else:
                 partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
                 ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', join='override', parallel=True, chunks={'trajectory': 10000, 'time':1000})
-                logger.info(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
-                # if the run contained reps, ensure trajectories have unique IDs for convenience
-                logger.info(f'self.reps = {self.reps}')
+                logger.debug(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
+                # if the run contained multiple seedings, ensure trajectories have unique IDs for convenience
+                logger.debug(f'self.seedings = {self.seedings}')
                 ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
-            
-            
+                       
             self.ds = ds
             #logger.info('get_ds: done.')
-
-        
 
         return self.ds
 
@@ -408,7 +406,7 @@ class PMAR(object):
     # Used for preprocessing function in get_ds to make sure all ds's have same time length, even if opendrift ended early because of all particles beaching.
     def find_correct_len(self):
         '''
-        Sometimes opendrift runs end early because e.g. all particles have beached, resulting in reps with different time lengths. This method finds the maximum time lenght of all reps.
+        Sometimes opendrift runs end early because e.g. all particles have beached, resulting in seedings with different time lengths. This method finds the maximum time lenght of all seedings.
         '''
         lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_path])
         logger.info(f'giving all datasets the same time length of {lens} tsteps...')
@@ -416,7 +414,7 @@ class PMAR(object):
 
     def _preprocess(self, ds, correct_len):
         '''
-        Sometimes opendrift runs end early because e.g. all particles have beached, resulting in reps with different time lengths. This method pads all reps so that they all have same time length (determined with find_correct_len).
+        Sometimes opendrift runs end early because e.g. all particles have beached, resulting in seedings with different time lengths. This method pads all seedings so that they all have same time length (determined with find_correct_len).
         '''
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
@@ -716,7 +714,7 @@ class PMAR(object):
         self.o.run(duration=duration, #end_time=end_time, 
                    time_step=time_step, #time_step_output=timedelta(hours=24), 
                    outfile=temp_outfile, 
-                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level'])#, 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
         elapsed = (T.time() - t_0)
         logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -946,8 +944,8 @@ class PMAR(object):
         
         '''
 
-        if self.reps > 1:
-            logger.warning(f'this run contains {self.reps} reps. to get histogram of aggregated reps, use .run() method. get_histogram() will only work on the last rep.')
+        if self.seedings > 1:
+            logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
 
         self.polygon_grid(res, r_bounds=r_bounds)
         xbin = self._x_e
@@ -1126,7 +1124,7 @@ class PMAR(object):
         
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, reps=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=None, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
         # calculate ppi
 
@@ -1145,16 +1143,16 @@ class PMAR(object):
         pass
 
     
-    def sum_reps(self, rep_path):
+    def sum_seedings(self, rep_path):
         '''
-        Sum ppi rasters of single reps, return summed raster. 
+        Sum ppi rasters of single seedings, return summed raster. 
     
         Parameters 
         ----------
         rep_path : list
             list of paths to each rep 
         '''
-        if self.reps == 1:
+        if self.seedings == 1:
             r1 = rxr.open_rasterio(rep_path)
         else:
             for idx, rep in enumerate(rep_path):
@@ -1166,15 +1164,15 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, reps=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
+    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), res=0.04, r_bounds=None, s_bounds=None, seeding_radius=0, beaching=False, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
         '''
-        Compute trajectories and produce ppi raster over required number of reps. 
+        Compute trajectories and produce ppi raster over required number of seedings. 
     
         Parameters
         ----------
         ptot : int
     
-        reps : int
+        seedings : int
     
         tshift : int
     
@@ -1198,15 +1196,17 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, reps=reps, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, poly_path=self.poly_path, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
+        self.ppi_path = []
+        
         self.output = xr.Dataset()
         
         if ppi_exists == True:
             logger.info('PPI with requested configurations found in cache.')
             self.output['ppi'] = rxr.open_rasterio(ppi_path)
         else:
-            for n in range(0, reps):
+            for n in range(0, seedings):
                 #print(f'Starting rep #{n+1}...')
                 start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
                 rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
@@ -1216,16 +1216,16 @@ class PMAR(object):
                 rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
                 # this will have to go as an attribute in ds too, useful for plotting
                 
-                pnum = int(np.round(ptot/reps)) #  ptot should be split among the reps
+                pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
                 
                 self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, r_bounds=r_bounds, s_bounds=s_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True, make_dt=make_dt, make_td=make_td)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
                 logger.info(f'Done with rep #{n}.')
     
             #if use_path:
-            if reps>1:
-                rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif')
+            if seedings>1:
+                rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
                 logger.info(f'############################## rep_ppi_path = {rep_ppi_path}')
-                self.output['ppi'] = ppi = self.sum_reps(rep_ppi_path)
+                self.output['ppi'] = ppi = self.sum_seedings(rep_ppi_path)
             
             self.write_tiff(self.output['ppi'], path=ppi_path)
         thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
@@ -1234,7 +1234,7 @@ class PMAR(object):
         # else:
         #     print('No use_path provided. Returning residence time only.')
 
-        passs
+        pass
         
     
     def plot(self, raster, title=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=cartopy.crs.epsg(3857), transform=cartopy.crs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, savepng=None):
