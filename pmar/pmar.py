@@ -67,40 +67,16 @@ class PMAR(object):
 
     Attributes
     ----------
-    depth : bool
-        boolean stating whether particle simulation is 2D (depth==False) or 3D (depth==True)
-    o : OceanDrift
-        OpenDrift object producing particle simulation
-    poly_path : str
-        path to shapefile containing polygon used for particle seeding
-    bathy_path : str
-        path to netcdf file for bathymetry (GEBCO)
-    particle_path : str
-        path to netcdf file containing output of OpenDrift simulation
-    raster : xarray
-        xarray object containing output of particle_raster() method
+
 
     Methods
     -------
-    run()
-        runs OpenDrift simulation and produces desired raster
-    make_poly()
-        if no polygon is given for seeding, creates and writes polygon based on given lon lat
-    get_trajectories()
-        runs OpenDrift simulation
-    particle_raster()
-        computes 2D histogram of particle concentration and writes to tif (if requested)
-    plot()
-        plots output of particle_raster()
-    scatter()
-        plots trajectories over time 
-    animate()
-        WIP
+
 
     """
 
 
-    def __init__(self, context, pressure='generic', chemical_compound=None, basedir='lpt_output', localdatadir = None, uv_path=None, wind_path=None, mld_path=None, bathy_path=None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
+    def __init__(self, context, pressure='generic', chemical_compound=None, basedir='lpt_output', localdatadir = None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -132,10 +108,6 @@ class PMAR(object):
 
 
         Path(basedir).mkdir(parents=True, exist_ok=True)
-        self.uv_path = uv_path
-        self.wind_path = wind_path
-        self.mld_path = mld_path 
-        self.bathy_path = bathy_path 
         self.basedir = Path(basedir)
         if particle_path is None:
             self.particle_path = [] # i can import an existing particle_path
@@ -152,7 +124,6 @@ class PMAR(object):
         self.depth = depth
         self.termvel = 1e-3
         self.decay_coef = 0
-        self.context = self.get_context(str(context))
         self.outputdir = None
         self.pressure = pressure
         self.chemical_compound = chemical_compound
@@ -210,24 +181,16 @@ class PMAR(object):
         else:
             pass
 
+        # define context
+        try: 
+            self.context = self.get_context(str(context))
+        except:
+            # alternatively, provide paths to readers manually
+            self.context = {'readers': dict(zip(range(0,len(context)),context))}
+        
         # if a path to a shapefile is given to be used for seeding, read it and save it in the lpt_output/polygons dir
         # why save it locally????
         Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
-        # if poly_path is not None: 
-        #     poly = gpd.read_file(poly_path).to_crs('epsg:4326')
-        #     bds = np.round(poly.total_bounds, 4) # only used for poly file name
-        #     local_poly = f'polygon-crs_epsg:{poly.crs}-lon_{bds[0]}_{bds[2]}-lat—{bds[1]}_{bds[3]}.shp'
-        #     q = self.basedir / 'polygons' / local_poly
-        #     poly.to_file(str(q), driver='ESRI Shapefile')
-        #     self.poly_path = str(q)
-        #else:
-         #   if 'med' in self.context:
-          #      self.poly_path = f'{DATA_DIR}/polygon-med-full-basin.shp'
-           # elif 'bs' in self.context:
-            #    self.poly_path = f'{DATA_DIR}/polygon-bs-full-basin.shp'
-           # else:
-           #     pass
-
         
         # this (if still needed?) should be a separate method
         # if particle_path is given, retrieve number of seedings and load ds
@@ -548,9 +511,6 @@ class PMAR(object):
 
         
         # path to write particle simulation file. also used for our 'cache'    
-        #poly = gpd.read_file(self.poly_path)
-        #bds = np.round(gpd.read_file(self.seeding_shapefile).total_bounds, 4) # only used in particle_path 
-        bds = self.extent # only used in particle_path 
         t0 = start_time.strftime('%Y-%m-%d')
         t1 = end_time.strftime('%Y-%m-%d')
         
@@ -720,7 +680,8 @@ class PMAR(object):
         #print('time len after ffill inactive', len(ps.time))
 
         # write useful attributes
-        ps = ps.assign_attrs({'extent': self.extent, 'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
+        ps = ps.assign_attrs({#'extent': self.extent, 
+                              'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
                               #'tseed': self.tseed.total_seconds(), 
                               'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': self.seeding_shapefile,
                               #'poly_path': self.poly_path, 
