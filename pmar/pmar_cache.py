@@ -21,8 +21,8 @@ class PMARCache(object):
         with open(path_metadata_file,'w') as fi:
             json.dump(kwargs,fi,default=str)
             
-    def particle_cache(self, context, pressure, chemical_compound, seeding_shapefile, pnum, start_time, duration_days, s_bounds, seeding_radius, beaching, z, tstep, hdiff, termvel, stokes_drift, seeding_id):
-        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'pnum': pnum, 'start_time': start_time, 'duration_days': duration_days, 's_bounds': s_bounds, 'seeding_radius': seeding_radius, 'beaching': beaching, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'stokes_drift': stokes_drift, 'seeding_id': seeding_id}
+    def particle_cache(self, context, pressure, chemical_compound, seeding_shapefile, pnum, start_time, duration_days, seed_within_bounds, seeding_radius, beaching, z, tstep, hdiff, termvel, stokes_drift, seeding_id):
+        cache_key = {'context': context, 'pressure': pressure, 'chemical_compound': chemical_compound, 'seeding_shapefile': seeding_shapefile, 'pnum': pnum, 'start_time': start_time, 'duration_days': duration_days, 'seed_within_bounds': seed_within_bounds, 'seeding_radius': seeding_radius, 'beaching': beaching, 'z': z, 'tstep': tstep, 'hdiff': hdiff, 'termvel': termvel, 'stokes_drift': stokes_drift, 'seeding_id': seeding_id}
         path_data_file = self.get_data_file('nc', **cache_key) # chiave della cache e nome del file
         self.set_metadata('nc', **cache_key) #TODO spostare
         logger.info('particle cache = '+str(cache_key))
