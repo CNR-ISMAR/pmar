@@ -169,11 +169,11 @@ class PMAR(object):
         self._y_c = None
         self.res = None
         self.weight = None
-        self.r_bounds = None
+        self.study_area = None
         self.res = None
         self.ds = None
         self.ppi_path = []
-        self.study_area = None # this will substitude r_bounds 
+        self.study_area = None # this will substitude study_area 
         self.seeding_shapefile = None # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
         self.seed_within_bounds = None # this will substitude seed_within_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
 
@@ -313,25 +313,25 @@ class PMAR(object):
             raise ValueError('polygon_grid needs to be called before using this method')
         return self._y_e
 
-    def polygon_grid(self, res, r_bounds=None):
+    def polygon_grid(self, res, study_area=None):
         '''
         Create grid of given resolution (res) and intersect it with poly_path.
         '''
 
         # todo: check crs matches too
-        if self._polygon_grid is not None and np.all(np.round((self._polygon_grid.length/4).values,8) == res) and np.all(np.round(self._polygon_grid.total_bounds,8) == r_bounds):
-            logger.debug(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and r_bounds = {r_bounds} = {self._polygon_grid.total_bounds} already calculated.')
+        if self._polygon_grid is not None and np.all(np.round((self._polygon_grid.length/4).values,8) == res) and np.all(np.round(self._polygon_grid.total_bounds,8) == study_area):
+            logger.debug(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and study_area = {study_area} = {self._polygon_grid.total_bounds} already calculated.')
                 
         else:        
-            logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and r_bounds = {r_bounds}.')
+            logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and study_area = {study_area}.')
             #res = self.res 
             crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
             
-            if r_bounds is not None: # if r_bounds are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
-                poly = make_poly(lon=[r_bounds[0], r_bounds[2]], lat=[r_bounds[1], r_bounds[3]]).to_crs('epsg:4326')#.buffer(distance=res*3)
-                logger.debug(f'making new polygon_grid using r_bounds = {r_bounds}')
+            if study_area is not None: # if study_area are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
+                poly = make_poly(lon=[study_area[0], study_area[2]], lat=[study_area[1], study_area[3]]).to_crs('epsg:4326')#.buffer(distance=res*3)
+                logger.debug(f'making new polygon_grid using study_area = {study_area}')
             else:
-                logger.error('PLEASE PROVIDE R_BOUNDS')
+                logger.error('PLEASE PROVIDE study_area')
                 # try:
                 #     poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
                 # except:
@@ -371,9 +371,9 @@ class PMAR(object):
                 
         return self._polygon_grid
 
-    def raster_grid(self, res=None, r_bounds=None):
-        logger.info(f'rasterizing grid with extent = {r_bounds}')
-        grid = self.polygon_grid(res=res, r_bounds=r_bounds)
+    def raster_grid(self, res=None, study_area=None):
+        logger.info(f'rasterizing grid with extent = {study_area}')
+        grid = self.polygon_grid(res=res, study_area=study_area)
         grid['weight'] = 1
         _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
         self._raster_grid = _raster_grid.weight
@@ -792,7 +792,7 @@ class PMAR(object):
         return y
 
     # TODO: when there are discrepancies in the grids, the integral does not match 
-    def use_by_traj(self, use_path, res, r_bounds=None):
+    def use_by_traj(self, use_path, res, study_area=None):
         '''
         Select value of use raster at the trajectories' starting positions. 
         Returns the use_value as a DataArray.
@@ -803,15 +803,15 @@ class PMAR(object):
             Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation.   
         res : float
             Resolution at which to bin use raster.
-        r_bounds : list, optional
+        study_area : list, optional
             Spatial bounds for computation of raster over a subregion, written as [x1,y1,x2,y2]. Default is None (bounds are taken from self.)
         '''
         logger.info('applying use weight...')
-        grid = self.polygon_grid(res, r_bounds=r_bounds)
+        grid = self.polygon_grid(res, study_area=study_area)
         poly_bounds = grid.total_bounds
         
         _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
-        gr = self.raster_grid(res=res, r_bounds=r_bounds)
+        gr = self.raster_grid(res=res, study_area=study_area)
         
         use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
         use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
@@ -840,9 +840,9 @@ class PMAR(object):
         
         return ds
 
-    def normalize_weight(self, weight, res, r_bounds=None):
+    def normalize_weight(self, weight, res, study_area=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
-        self.ds = self.get_bin_n(res=res, t=0, r_bounds=r_bounds)
+        self.ds = self.get_bin_n(res=res, t=0, study_area=study_area)
         logger.info('weight_by_bin...')
         weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0)
         #logger.info('done.')
@@ -852,11 +852,11 @@ class PMAR(object):
         #logger.info('done.')
         return normalized_weight
 
-    def set_weights(self, res=None, r_bounds=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
+    def set_weights(self, res=None, study_area=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
         
         if use_path is not None:
             # extract value of use at starting position of each trajectory
-            use_value = self.use_by_traj(use_path=use_path, res=res, r_bounds=r_bounds)
+            use_value = self.use_by_traj(use_path=use_path, res=res, study_area=study_area)
             weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
 
         if emission is not None:
@@ -874,7 +874,7 @@ class PMAR(object):
         weight = xr.DataArray(weight).broadcast_like(self.ds.lon)
         
         if normalize is True:
-            weight = self.normalize_weight(weight, res=res, r_bounds=r_bounds)
+            weight = self.normalize_weight(weight, res=res, study_area=study_area)
             logger.info('weight normalized by number of particles in bin at t0.')
 
         # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
@@ -888,7 +888,7 @@ class PMAR(object):
     
 
 
-    def get_bin_n(self, res, t=0, r_bounds=None):
+    def get_bin_n(self, res, t=0, study_area=None):
         '''
         Add new variable to ds ('bin_n_t0') containing its "bin number" at timestep t, i.e. a unique identifier corresponding to a specific spatial grid-cell. 
         
@@ -898,7 +898,7 @@ class PMAR(object):
             index of timestep to consider
         '''
       
-        grid = self.polygon_grid(res, r_bounds=r_bounds)
+        grid = self.polygon_grid(res, study_area=study_area)
         ds = self.get_ds
         # calculate bin number of each trajectory at time 0, assign it to variable bin_n_t0
         _bins = np.zeros((len(grid),2)) 
@@ -917,7 +917,7 @@ class PMAR(object):
             
         return ds
 
-    def get_histogram(self, res, r_bounds=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
+    def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
         '''
         "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
         from Stanev et al., 2019
@@ -934,13 +934,13 @@ class PMAR(object):
         if self.seedings > 1:
             logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
 
-        self.polygon_grid(res, r_bounds=r_bounds)
+        self.polygon_grid(res, study_area=study_area)
         xbin = self._x_e
         ybin = self._y_e
         
         #self.get_ds
         
-        weights = self.set_weights(res=res, r_bounds=r_bounds, weight=weight, normalize=normalize, use_path=use_path, emission=emission, decay_coef=decay_coef, assign=assign)
+        weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use_path=use_path, emission=emission, decay_coef=decay_coef, assign=assign)
         logger.info('set_weights done.')
         
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
@@ -953,7 +953,7 @@ class PMAR(object):
         return h
 
 
-    def ppi(self, res, use_path=None, emission=None, r_bounds=None, decay_coef=0, normalize=True): 
+    def ppi(self, res, use_path=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
         '''
         Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
         ppi is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
@@ -967,32 +967,32 @@ class PMAR(object):
             Path of file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
         emission : float, optional
             amount of pressure released per day by use in use_path 
-        r_bounds : list, optional
+        study_area : list, optional
 
         decay_coef : float, optional
 
         normalize : bool, optional
         
         '''
-        # if r_bounds is None:
-        #     r_bounds = self.extent # take whole basin
+        # if study_area is None:
+        #     study_area = self.extent # take whole basin
         
         if use_path is None:
             logger.info('no use_path provided. calculating ppi from unity-use.')
-            self.raster_grid(res=res, r_bounds=r_bounds).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
+            self.raster_grid(res=res, study_area=study_area).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
             self.use_path = Path (self.basedir / 'unity-use.tif')
         
         # if emission is not None:
         #     self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
         #     logger.warning(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             
-        #weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
+        #weights = self.set_weights(res=res, study_area=study_area, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
 
         #### NEED TO DO THIS, BUT ONLY FOR LAST REP, IN A LOOP
         # self._particle_path ? 
         #self.ds = self.get_ds
         
-        r = self.get_histogram(res=res, r_bounds=r_bounds, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
+        r = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
@@ -1000,11 +1000,11 @@ class PMAR(object):
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
     
-    def _traj_per_bin(self, res, r_bounds=None, use_path=None):#, weighted=False):
+    def _traj_per_bin(self, res, study_area=None, use_path=None):#, weighted=False):
         counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
         
         if use_path is not None:
-            weights = self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, normalize=False, assign=True)
+            weights = self.set_weights(res=res, study_area=study_area, use_path=use_path, normalize=False, assign=True)
 
         # this way, it will take the weight 
         try:
@@ -1020,11 +1020,11 @@ class PMAR(object):
 
         return tpb.fillna(0.).sum('trajectory')
 
-    def traj_density(self, res, r_bounds=None): # similar to emodnet route density
+    def traj_density(self, res, study_area=None): # similar to emodnet route density
         w = self.set_weights(1)
         self.ds = self.get_bin_n(res=res, t='all')
         w_distinct = xr.apply_ufunc(traj_distinct, self.ds.bin_n.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), w.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), input_core_dims = [['time'],['time']], output_core_dims = [['time']], vectorize=True, dask='parallelized')
-        h_distinct = self.get_histogram(res=res, r_bounds=r_bounds, weight=w_distinct, block_size='auto')
+        h_distinct = self.get_histogram(res=res, study_area=study_area, weight=w_distinct, block_size='auto')
         return h_distinct
 
 
@@ -1059,7 +1059,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, r_bounds=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1101,7 +1101,7 @@ class PMAR(object):
             # add weight to ds 
             # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
             if use_path or emission or decay_coef != 0:
-                self.set_weights(res=res, r_bounds=r_bounds, use_path=use_path, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
+                self.set_weights(res=res, study_area=study_area, use_path=use_path, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
             
 
         # otherwise, run requested simulation
@@ -1122,14 +1122,16 @@ class PMAR(object):
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
 
-        if not r_bounds:
+        if not study_area:
             if seed_within_bounds:
-                r_bounds = seed_within_bounds
+                study_area = seed_within_bounds
+            elif seeding_shapefile:
+                study_area = gpd.read_file(seeding_shapefile).total_bounds
             else:
-                r_bounds = self.extent # take whole basin
+                study_area = self.extent # take whole basin
 
         
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         self.ppi_path.append(ppi_path)
         
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
@@ -1138,7 +1140,7 @@ class PMAR(object):
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
         else:
-            ppi = self.ppi(use_path=use_path, emission=emission, res=res, r_bounds=r_bounds, decay_coef=decay_coef)
+            ppi = self.ppi(use_path=use_path, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
 
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
                    
@@ -1171,7 +1173,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, res=0.04, r_bounds=None, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
+    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, res=0.04, study_area=None, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of seedings. 
     
@@ -1189,7 +1191,7 @@ class PMAR(object):
     
         res : float, optional
 
-        r_bounds : list, optional
+        study_area : list, optional
     
         use_path : string, optional
 
@@ -1205,7 +1207,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, r_bounds=r_bounds)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         
@@ -1227,7 +1229,7 @@ class PMAR(object):
                 
                 pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
                 
-                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, r_bounds=r_bounds, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
                 logger.info(f'Done with rep #{n}.')
     
             #if use_path:
