@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, date
 from shapely.geometry import Point, Polygon
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
+from opendrift.models.plastdrift import PlastDrift
 from opendrift.models.chemicaldrift import ChemicalDrift
 #import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
@@ -105,17 +106,15 @@ class PMAR(object):
             self.particle_path = particle_path
         #self.ds = None. commented otherwise try: self.ds except: does not work
         self.o = None
-       # self.poly_path = poly_path 
-#        self.raster = None unused
         self.seeding_id = None
         #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
         self.depth = depth
-        self.termvel = 1e-3
+        self.termvel = 0 #1e-3
         self.decay_coef = 0
         self.outputdir = None
-        self.pressure = pressure
+        #self.pressure = pressure
         self.chemical_compound = chemical_compound
         self.localdatadir = localdatadir
         self.particle_status = None
@@ -134,10 +133,8 @@ class PMAR(object):
         self.res = None
         self.ds = None
         self.ppi_path = []
-        self.study_area = None # this will substitude study_area 
-        self.seeding_shapefile = None # this will substitude poly_path, and is only to be used for seeding. can be point, line or polygon. if point or line, buffer needs to be added
-        self.seed_within_bounds = None # this will substitude seed_within_bounds. if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
-
+        self.seeding_shapefile = None # can be point, line or polygon
+        self.seed_within_bounds = None # if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
         self.loglevel = loglevel
         
         # set up logger 
@@ -155,21 +152,23 @@ class PMAR(object):
         logger.setLevel(loglevel)
         
         # This should be a separate method
-        pres_list = ['general', 'microplastic', 'bacteria']
-        pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_coef'], 
-                    data = {'pressure': pres_list, 
-                            'termvel': [0, 1e-3, 0], 
-                            'decay_coef': [0, 0, 1]})
+        # pres_list = ['general', 'microplastic', 'bacteria']
+        # pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_coef'], 
+        #             data = {'pressure': pres_list, 
+        #                     'termvel': [0, 1e-3, 0], 
+        #                     'decay_coef': [0, 0, 1]})
                 
-        if pressure in pres_list:
-            self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
-            self.decay_coef = pressures[pressures['pressure'] == f'{pressure}']['decay_coef'].values[0]
+        # if pressure in pres_list:
+        #     self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
+        #     self.decay_coef = pressures[pressures['pressure'] == f'{pressure}']['decay_coef'].values[0]
         
-        elif pressure == 'oil':
-            pass
+        # elif pressure == 'oil':
+        #     pass
         
-        else:
-            pass
+        # else:
+        #     pass
+
+        self.set_pressure(pressure)
 
         # define context
         try: 
@@ -189,6 +188,19 @@ class PMAR(object):
                 if self.particle_path:
                     self.seedings = len(particle_path)
                 
+
+
+    def set_pressure(self, pressure):
+        pressures = {'generic': {'opendrift_module': OceanDrift},
+                     'plastic': {'opendrift_module': PlastDrift},
+                  #   'bacteria': {'opendrift_module': OceanDrift, 'termvel':0, 'decay_coef':1},
+                     'chemical': {'opendrift_module': ChemicalDrift},
+                     'oil': {'opendrift_module': OpenOil},
+                     'metal': {'opendrift_module': ChemicalDrift}}        
+
+        self.pressure = pressure
+        self.opendrift_module = pressures[pressure]['opendrift_module']
+        logger.info(f'initializing pressure {self.pressure} with opendrift module {self.opendrift_module}')
 
     def get_context(self, context):
         """
@@ -506,12 +518,13 @@ class PMAR(object):
         
             
         # initialise OpenDrift object
-        if self.pressure == 'oil':
-            self.o = OpenOil(loglevel=40)#self.loglevel)
-        elif self.pressure in ['chemical', 'metal']:
-            self.o = ChemicalDrift(loglevel=40)#=self.loglevel)
-        else:
-            self.o = OceanDrift(loglevel=40)#self.loglevel) 
+        # if self.pressure == 'oil':
+        #     self.o = OpenOil(loglevel=40)#self.loglevel)
+        # elif self.pressure in ['chemical', 'metal']:
+        #     self.o = ChemicalDrift(loglevel=40)#=self.loglevel)
+        # else:
+        #     self.o = OceanDrift(loglevel=40)#self.loglevel) 
+        self.o = self.opendrift_module(loglevel=40)
             
         
         # some OpenDrift configurations
