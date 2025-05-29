@@ -76,30 +76,20 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context, pressure='generic', chemical_compound=None, basedir='lpt_output', localdatadir = None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
+    def __init__(self, context='global', pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
-        context : str
-            String defining the context of the simulation i.e., the ocean model output to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
+        context : str or list, optional
+            If str, an ocean basin for which CMEMS readers are available. Otherwise, a list of paths of files to be imported as OpenDrift readers. Default is 'global'
         pressure : str, optional
 
         chemical_compound : str, optional
             if pressure is 'chemical', a chemical_compound can be specified to be initialised in ChemicalDrift
         basedir : str, optional
-            path to the base directory where all output will be stored. Default is to create a directory called 'lpt output' in the current directory.
+            path to the base directory where all output will be stored. Default is to create a directory called 'pmar_output' in the current directory.
         localdatadir : str, optional
             path to directory where input data (ocean, atmospheric) is stored. Default is None
-        poly_path : str, optional
-            path to shapefile containing polygon to be used for seeding of particles.
-        uv_path : str, optional
-            path to the netcdf file containing ocean current data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.
-        wind_path : str, optional
-            path to the netcdf file containing wind velocity data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.        
-        mld_path : str, optional
-            path to the netcdf file containing mixed layer depth data. Default is 'cmems', meaning CMEMS data will be streamed from Copernicus.  
-        bathy_path : str
-            Path to bathymetry file to be used in 3D simulations. Default is None. An error is raised if depth is True and bathy_path is None. 
         particle_path : str, optional
             path to netcdf file containing output of OpenDrift simulation. Default is None. If a particle_path is given in initialisation,    
         depth : bool, optional
@@ -188,7 +178,7 @@ class PMAR(object):
             # alternatively, provide paths to readers manually
             self.context = {'readers': dict(zip(range(0,len(context)),context))}
         
-        # if a path to a shapefile is given to be used for seeding, read it and save it in the lpt_output/polygons dir
+        # if a path to a shapefile is given to be used for seeding, read it and save it in the pmar_output/polygons dir
         # why save it locally????
         Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)            
         
