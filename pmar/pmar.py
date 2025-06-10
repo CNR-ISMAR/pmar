@@ -106,7 +106,7 @@ class PMAR(object):
             self.particle_path = particle_path
         #self.ds = None. commented otherwise try: self.ds except: does not work
         self.o = None
-        self.seeding_id = None
+        self.seeding_id = 0 # gives error in opendrift if set to None
         #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
@@ -449,7 +449,7 @@ class PMAR(object):
     
         return poly
     
-    def get_trajectories(self, pnum, start_time='2019-01-01', season=None, duration_days=30, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
+    def get_trajectories(self, pnum, start_time, season=None, duration_days=30, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -466,22 +466,30 @@ class PMAR(object):
             String defining the context of the simulation i.e., the model data to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
         pnum : int 
             The number of particles to be seeded
-        start_time : str, optional
-            The start time of the simulation. Default is '2019-01-01'
+        start_time : str
+            The start date of the simulation, in string format 'dd-mm-yyyy'
         season : str, optional
             Season in which simulation should be run. Defines start_time automatically. Default is None
         duration_days : int, optional
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
+        seeding_shapefile : str, optional
+            Path to a shapefile containing geometries to seed within. Default is None,  i.e. the whole basin is covered.
         seed_within_bounds : list, optional
             Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
         z : float, optional
-            Depth at which to seed particles in [m]. Default is -0.5m. 
+            Depth at which to seed particles [m]. Default is -0.5m. 
         tstep : timedelta, optional
             Time step used for OpenDrift simulation. Default is 6 hours
         hdiff : float, optional
             Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles, in [m/s]. Default is None, meaning termvel is defined in __init__      
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is None, meaning termvel is defined in __init__  
+        seeding_radius : float, optional
+            Opendrift "radius".
+        beaching : bool, optional
+
+        stokes_drift : bool, optional
+        
         crs : str, optional
             EPSG string for polygon. Default is 4326   
         loglevel : int, optional
@@ -614,7 +622,7 @@ class PMAR(object):
                 
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
             q = self.basedir / 'polygons' / poly_path
-            make_poly(lon, lat, crs=crs, save_to=q)
+            make_poly(lon, lat, crs=crs, save_to=str(q))
             self.seeding_shapefile = str(q)
             logger.info(f'seeding within bounds {lon},{lat}')
 
@@ -624,6 +632,7 @@ class PMAR(object):
         else: 
             # not needed anymore. seed_from_shapefile accepts point features
             # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
+            self.seeding_shapefile = seeding_shapefile
             if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
                 seeding_poly = gpd.read_file(self.seeding_shapefile)
                 seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
@@ -637,6 +646,7 @@ class PMAR(object):
         
         
         # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
+        logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
         if self.depth == True:
             self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
             self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
@@ -791,7 +801,7 @@ class PMAR(object):
     # to deprecate
     def _assign_weight(self, weight=1):
         """
-        Add a weight variable to ds. If 
+        Add a weight variable to ds. 
         """
         # TODO. produce weight variable from floats, arrays, shapefiles, rasters
         
@@ -1023,7 +1033,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, hdiff=10, z=-0.5, termvel=None, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=None, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1070,7 +1080,7 @@ class PMAR(object):
 
         # otherwise, run requested simulation
         else:
-            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff)
+            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff)
             self.ds.to_netcdf(str(file_path))
             logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
 
@@ -1137,7 +1147,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, seeding_radius=0, beaching=False, res=0.04, study_area=None, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
+    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of seedings. 
     
@@ -1193,7 +1203,7 @@ class PMAR(object):
                 
                 pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
                 
-                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
                 logger.info(f'Done with rep #{n}.')
     
             #if use_path:

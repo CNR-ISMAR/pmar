@@ -59,7 +59,7 @@ def make_poly(lon, lat, crs='4326', save_to=None):
         raise ValueError("'lon' and 'lat' must have length larger than 2")
     
     if save_to is not None:
-        poly.to_file(str(save_to), driver='ESRI Shapefile')
+        poly.to_file(save_to, driver='ESRI Shapefile')
         #self.poly_path = str(q)
 
     return poly
