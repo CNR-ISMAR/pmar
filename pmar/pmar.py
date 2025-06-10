@@ -110,7 +110,6 @@ class PMAR(object):
         #self.netrc_path = netrc_path
         self.tstep = None
         self.pnum = None
-        self.depth = depth
         self.termvel = 0 #1e-3
         self.decay_coef = 0
         self.outputdir = None
@@ -449,7 +448,7 @@ class PMAR(object):
     
         return poly
     
-    def get_trajectories(self, pnum, start_time, season=None, duration_days=30, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=None, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
+    def get_trajectories(self, pnum, start_time, season=None, duration_days=30, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -483,7 +482,7 @@ class PMAR(object):
         hdiff : float, optional
             Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
-            Terminal velocity representing buoyancy of particles, in [m/s]. Default is None, meaning termvel is defined in __init__  
+            Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0. Positive means rising up, negative sinking down
         seeding_radius : float, optional
             Opendrift "radius".
         beaching : bool, optional
@@ -499,8 +498,8 @@ class PMAR(object):
         
         t_0 = T.time()   
          
-        if termvel is None:
-            termvel = self.termvel
+        # if termvel is None:
+        #     termvel = self.termvel
         
         ### time settings ####
         ssns = {'summer': datetime(2019,6,1),
@@ -647,19 +646,13 @@ class PMAR(object):
         
         # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
         logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
-        if self.depth == True:
-            self.o.set_config('seed:terminal_velocity', termvel) # terminal velocity
-            self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
-                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
+
+        self.termvel = termvel
+        self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
+                                   terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
             #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-            self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
-            self.o.set_config('drift:vertical_mixing', True)
-        
-        # if simulation is 2D, simply seed particles over polygon
-        else:
-            logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
-            self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time,
-                                       origin_marker=self.seeding_id, radius=seeding_radius) # 
+            #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
+#            self.o.set_config('drift:vertical_mixing', True)
         
         # run simulation and write to temporary file
         #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
@@ -696,7 +689,7 @@ class PMAR(object):
         ps = ps.assign_attrs({#'extent': self.extent, 
                               'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
                               #'tseed': self.tseed.total_seconds(), 
-                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'depth': str(self.depth), 'seeding_shapefile': self.seeding_shapefile,
+                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'seeding_shapefile': self.seeding_shapefile,
                               #'poly_path': self.poly_path, 
                               'opendrift_log': str(self.o)}) 
 
@@ -1033,7 +1026,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=None, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
         '''
         Compute trajectories and producing raster maps of ppi.
         
