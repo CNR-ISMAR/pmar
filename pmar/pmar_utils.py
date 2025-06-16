@@ -6,6 +6,11 @@ import geopandas as gpd
 from rasterio.enums import Resampling
 import pandas as pd
 from shapely.geometry import Point, Polygon
+from geocube.api.core import make_geocube
+from functools import partial
+from geocube.rasterize import rasterize_image
+from rasterio.enums import MergeAlg
+
 
 def make_poly(lon, lat, crs='4326', save_to=None):
     """
@@ -112,6 +117,7 @@ def rasterize_points_add(point_data, res, measurements=None):
                     resolution=(-res, res), 
                     fill=0,
                     rasterize_function=partial(rasterize_image, merge_alg=MergeAlg.add, fill=0, all_touched=True, filter_nan=True))
+    logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
     return raster_data
 
 def check_particle_file(path_to_file):

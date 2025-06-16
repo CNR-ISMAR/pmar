@@ -338,16 +338,16 @@ class PMAR(object):
         if self.particle_path:
             logger.info('get_ds: retrieving ds from particle_path.')
             
-            if type(self.particle_path) is str or len(self.particle_path) == 1:
-                ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
+           # if type(self.particle_path) is str or len(self.particle_path) == 1:
+            #    ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
             
-            else:
-                partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
-                ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', parallel=True, chunks={'trajectory': 10000, 'time':1000}) # add join='ovverride' to have them realigned
-                logger.debug(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
-                # if the run contained multiple seedings, ensure trajectories have unique IDs for convenience
-                logger.debug(f'self.seedings = {self.seedings}')
-                ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
+            #else:
+            partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
+            ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', parallel=True, chunks={'trajectory': 10000, 'time':1000}) # add join='ovverride' to have them realigned
+            logger.debug(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
+            # if the run contained multiple seedings, ensure trajectories have unique IDs for convenience
+            logger.debug(f'self.seedings = {self.seedings}')
+            ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
                        
             self.ds = ds
         else:
@@ -793,8 +793,8 @@ class PMAR(object):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
         self.ds = self.get_bin_n(res=res, t=0, study_area=study_area)
         logger.info('weight_by_bin...')
-        weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0)
-        #logger.info('done.')
+        weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0.load()) # added load otherwise groupby raises error
+        #logger.info('done.') 
         counts_per_bin = self.ds.isel(time=0).bin_n_t0.groupby(self.ds.isel(time=0).bin_n_t0).count()
         logger.info('counts_per_bin...')
         normalized_weight = weight_by_bin/counts_per_bin 
@@ -941,7 +941,7 @@ class PMAR(object):
         # self._particle_path ? 
         #self.ds = self.get_ds
         
-        r = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
+        r = self.get_histogram(res=res, study_area=study_area, normalize=True, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
@@ -1038,6 +1038,14 @@ class PMAR(object):
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
         #self.particle_path = str(file_path)
         self.particle_path.append(file_path) 
+
+        #if use_path is a shapefile, rasterize it using geocube (NB: only tested with points)
+        if use_path and Path(use_path).suffix == '.shp':
+            vector_use = gpd.read_file(use_path)
+            raster_use = rasterize_points_add(vector_use, res=res)
+            use_path = str(self.basedir)+use_path.split('/')[-1].split('.shp')[0]+'.tif'
+            raster_use.rio.to_raster(use_path)
+            logger.debug(f'Rasterized use: {use_path}')
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -1088,7 +1096,7 @@ class PMAR(object):
 
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
-        else:
+        else:            
             ppi = self.ppi(use_path=use_path, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
 
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
