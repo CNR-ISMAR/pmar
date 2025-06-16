@@ -45,7 +45,7 @@ import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon, make_poly
+from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon, make_poly, rasterize_points_add
 
 
 logger = logging.getLogger('pmar')
@@ -77,7 +77,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context='global', pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, depth=False, netrppi_path=None, loglevel=10):
+    def __init__(self, context='global', pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -93,8 +93,6 @@ class PMAR(object):
             path to directory where input data (ocean, atmospheric) is stored. Default is None
         particle_path : str, optional
             path to netcdf file containing output of OpenDrift simulation. Default is None. If a particle_path is given in initialisation,    
-        depth : bool, optional
-            boolean stating whether particle simulation is 2D (depth==False) or 3D (depth==True). Default is False
         """
 
 
@@ -149,23 +147,6 @@ class PMAR(object):
         if loglevel < 10:  # 0 is NOTSET, giving no output
             loglevel = 10
         logger.setLevel(loglevel)
-        
-        # This should be a separate method
-        # pres_list = ['general', 'microplastic', 'bacteria']
-        # pressures = pd.DataFrame(columns=['pressure', 'termvel', 'decay_coef'], 
-        #             data = {'pressure': pres_list, 
-        #                     'termvel': [0, 1e-3, 0], 
-        #                     'decay_coef': [0, 0, 1]})
-                
-        # if pressure in pres_list:
-        #     self.termvel = pressures[pressures['pressure'] == f'{pressure}']['termvel'].values[0]
-        #     self.decay_coef = pressures[pressures['pressure'] == f'{pressure}']['decay_coef'].values[0]
-        
-        # elif pressure == 'oil':
-        #     pass
-        
-        # else:
-        #     pass
 
         self.set_pressure(pressure)
 
@@ -648,11 +629,12 @@ class PMAR(object):
         logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
 
         self.termvel = termvel
+        self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
+        #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
+        self.o.set_config('drift:vertical_mixing', True)        
         self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
                                    terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
-            #self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-            #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
-#            self.o.set_config('drift:vertical_mixing', True)
+
         
         # run simulation and write to temporary file
         #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:

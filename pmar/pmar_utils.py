@@ -104,6 +104,15 @@ def rasterhd2raster(raster_hd, grid):
              )                                                                                                                                                                          
     return raster 
     
+def rasterize_points_add(point_data, res, measurements=None):
+    '''
+    Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
+    '''
+    raster_data = make_geocube(vector_data=point_data, measurements=measurements, 
+                    resolution=(-res, res), 
+                    fill=0,
+                    rasterize_function=partial(rasterize_image, merge_alg=MergeAlg.add, fill=0, all_touched=True, filter_nan=True))
+    return raster_data
 
 def check_particle_file(path_to_file):
     ds = xr.open_dataset(path_to_file)
