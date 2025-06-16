@@ -338,11 +338,13 @@ class PMAR(object):
         if self.particle_path:
             logger.info('get_ds: retrieving ds from particle_path.')
             
-           # if type(self.particle_path) is str or len(self.particle_path) == 1:
+            if type(self.particle_path) is str or len(self.particle_path) == 1:
             #    ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
             
-            #else:
-            partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
+                partial_func = None
+            else:
+                partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
+                
             ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', parallel=True, chunks={'trajectory': 10000, 'time':1000}) # add join='ovverride' to have them realigned
             logger.debug(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
             # if the run contained multiple seedings, ensure trajectories have unique IDs for convenience
