@@ -45,7 +45,7 @@ import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon, make_poly, rasterize_points_add
+from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon, make_poly, harmonize_use
 
 
 logger = logging.getLogger('pmar')
@@ -743,14 +743,14 @@ class PMAR(object):
         return y
 
     # TODO: when there are discrepancies in the grids, the integral does not match 
-    def use_by_traj(self, use_path, res, study_area=None):
+    def use_by_traj(self, use, res, study_area=None):
         '''
         Select value of use raster at the trajectories' starting positions. 
         Returns the use_value as a DataArray.
 
         Parameters
         ----------
-        use_path : str
+        use : str
             Path of .tif file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation.   
         res : float
             Resolution at which to bin use raster.
@@ -758,14 +758,14 @@ class PMAR(object):
             Spatial bounds for computation of raster over a subregion, written as [x1,y1,x2,y2]. Default is None (bounds are taken from self.)
         '''
         logger.info('applying use weight...')
-        grid = self.polygon_grid(res, study_area=study_area)
-        poly_bounds = grid.total_bounds
+        # grid = self.polygon_grid(res, study_area=study_area)
+        # poly_bounds = grid.total_bounds
         
-        _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
-        gr = self.raster_grid(res=res, study_area=study_area)
+        # _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
+        # gr = self.raster_grid(res=res, study_area=study_area)
         
-        use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
-        use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+        # use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
+        # use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
         self.use = use
         
         use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
@@ -803,11 +803,11 @@ class PMAR(object):
         #logger.info('done.')
         return normalized_weight
 
-    def set_weights(self, res=None, study_area=None, weight=1, use_path=None, emission=None, decay_coef=0, normalize=False, assign=False):
+    def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=False):
         
-        if use_path is not None:
+        if use is not None:
             # extract value of use at starting position of each trajectory
-            use_value = self.use_by_traj(use_path=use_path, res=res, study_area=study_area)
+            use_value = self.use_by_traj(use=use, res=res, study_area=study_area)
             weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
 
         if emission is not None:
@@ -868,7 +868,7 @@ class PMAR(object):
             
         return ds
 
-    def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use_path=None, emission=None, decay_coef=0):
+    def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use=None, emission=None, decay_coef=0):
         '''
         "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
         from Stanev et al., 2019
@@ -891,7 +891,7 @@ class PMAR(object):
         
         #self.get_ds
         
-        weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use_path=use_path, emission=emission, decay_coef=decay_coef, assign=assign)
+        weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use=use, emission=emission, decay_coef=decay_coef, assign=assign)
         logger.info('set_weights done.')
         
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
@@ -904,7 +904,7 @@ class PMAR(object):
         return h
 
 
-    def ppi(self, res, use_path=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
+    def ppi(self, res, use=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
         '''
         Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
         ppi is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
@@ -914,10 +914,10 @@ class PMAR(object):
         ----------
         res : float
         
-        use_path : str
+        use : str
             Path of file representing density of human activity acting as pressure source. Used to assign  'weights' to trajectories in histogram calculation. 
         emission : float, optional
-            amount of pressure released per day by use in use_path 
+            amount of pressure released per day by use in use 
         study_area : list, optional
 
         decay_coef : float, optional
@@ -928,10 +928,11 @@ class PMAR(object):
         # if study_area is None:
         #     study_area = self.extent # take whole basin
         
-        if use_path is None:
-            logger.info('no use_path provided. calculating ppi from unity-use.')
+        if use is None:
+            logger.info('no use provided. calculating ppi from unity-use.')
             self.raster_grid(res=res, study_area=study_area).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
-            self.use_path = Path (self.basedir / 'unity-use.tif')
+            #self.use_path = Path (self.basedir / 'unity-use.tif')
+            self.use = self.raster_grid
         
         # if emission is not None:
         #     self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
@@ -943,7 +944,7 @@ class PMAR(object):
         # self._particle_path ? 
         #self.ds = self.get_ds
         
-        r = self.get_histogram(res=res, study_area=study_area, normalize=True, assign=True, block_size=len(self.ds.time), use_path=use_path, decay_coef=decay_coef, emission=emission).assign_attrs({'use_path': use_path, 'emission':emission})
+        r = self.get_histogram(res=res, study_area=study_area, normalize=True, assign=True, block_size=len(self.ds.time), use=use, decay_coef=decay_coef, emission=emission)#.assign_attrs({'use_path': use_path, 'emission':emission})
 
         return r
 
@@ -951,11 +952,11 @@ class PMAR(object):
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
     
-    def _traj_per_bin(self, res, study_area=None, use_path=None):#, weighted=False):
+    def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
         counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
         
-        if use_path is not None:
-            weights = self.set_weights(res=res, study_area=study_area, use_path=use_path, normalize=False, assign=True)
+        if use is not None:
+            weights = self.set_weights(res=res, study_area=study_area, use=use, normalize=False, assign=True)
 
         # this way, it will take the weight 
         try:
@@ -1010,7 +1011,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, study_area=None, use_path=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
+    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, study_area=None, use=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -1024,7 +1025,7 @@ class PMAR(object):
             Duration of the run, in days. 
         res : float
             Resolution of output rasters, in lon/lat degrees.
-        use_path : string, optional
+        use : string, optional
             Path to map of human activities (.tiff) considered as pressure source. Default is None
         decay_coef : float, optional
             Coefficient k of exponential decay function. Default is 0 (no decay)
@@ -1042,12 +1043,16 @@ class PMAR(object):
         self.particle_path.append(file_path) 
 
         #if use_path is a shapefile, rasterize it using geocube (NB: only tested with points)
-        if use_path and Path(use_path).suffix == '.shp':
-            vector_use = gpd.read_file(use_path)
-            raster_use = rasterize_points_add(vector_use, res=res)
-            use_path = str(self.basedir)+use_path.split('/')[-1].split('.shp')[0]+'.tif'
-            raster_use.rio.to_raster(use_path)
-            logger.debug(f'Rasterized use: {use_path}')
+        # if use_path and Path(use_path).suffix == '.shp':
+        #     vector_use = gpd.read_file(use_path)
+        #     raster_use = rasterize_points_add(vector_use, res=res)
+        #     use_path = str(self.basedir)+use_path.split('/')[-1].split('.shp')[0]+'.tif'
+        #     raster_use.rio.to_raster(use_path)
+        #     logger.debug(f'Rasterized use: {use_path}')
+        if use is not None:
+            raster_grid = self.raster_grid(res=res, study_area=study_area)
+            use = harmonize_use(use, res, study_area=study_area, raster_grid=raster_grid)
+            self.use = use
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -1059,8 +1064,8 @@ class PMAR(object):
             #self.poly_path = self.ds.poly_path
             # add weight to ds 
             # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
-            if use_path or emission or decay_coef != 0:
-                self.set_weights(res=res, study_area=study_area, use_path=use_path, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
+            if use or emission or decay_coef != 0:
+                self.set_weights(res=res, study_area=study_area, use=use, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
             
 
         # otherwise, run requested simulation
@@ -1073,8 +1078,8 @@ class PMAR(object):
         # # create dataset where all outputs will be stored
         self.output = xr.Dataset()
 
-        if use_label is None and use_path is not None:
-            use_label = str(use_path).split('/')[-1][:10]
+        # if use_label is None and use_path is not None:
+        #     use_label = str(use_path).split('/')[-1][:10]
             
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
         
@@ -1099,7 +1104,7 @@ class PMAR(object):
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
         else:            
-            ppi = self.ppi(use_path=use_path, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
+            ppi = self.ppi(use=use, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
 
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
                    
@@ -1132,7 +1137,7 @@ class PMAR(object):
         
         return r1
     
-    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use_path=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
+    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
         '''
         Compute trajectories and produce ppi raster over required number of seedings. 
     
@@ -1152,7 +1157,7 @@ class PMAR(object):
 
         study_area : list, optional
     
-        use_path : string, optional
+        use : string, optional
 
         use_label : string, optional
     
@@ -1166,7 +1171,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         
@@ -1188,7 +1193,7 @@ class PMAR(object):
                 
                 pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
                 
-                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, use_path=use_path, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
+                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, use=use, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
                 logger.info(f'Done with rep #{n}.')
     
             #if use_path:

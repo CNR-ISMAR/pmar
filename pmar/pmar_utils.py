@@ -1,5 +1,6 @@
 import numpy as np
 import xarray as xr
+import rioxarray as rxr
 from copy import deepcopy
 import cartopy.io.shapereader as shpreader
 import geopandas as gpd
@@ -10,6 +11,9 @@ from geocube.api.core import make_geocube
 from functools import partial
 from geocube.rasterize import rasterize_image
 from rasterio.enums import MergeAlg
+import logging
+from pathlib import Path
+logger = logging.getLogger('pmar')
 
 
 def make_poly(lon, lat, crs='4326', save_to=None):
@@ -120,18 +124,62 @@ def rasterize_points_add(point_data, res, measurements=None):
     logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
     return raster_data
 
+
+def harmonize_use(use, res, study_area, raster_grid):
+    '''
+    Use can be a path to a shapefile or raster, a geopandas geodataframe or a xarray object.
+    This method rasterizes use (if needed), it reprojects it to standard projection, it resamples it on given grid and within chosen bounding box. 
+    Use is now compatible with PMAR run and ready to be assigned as weight to particles. 
+    '''
+    try:
+        Path(use).suffix
+        if Path(use).suffix == '.shp':
+            logger.debug('use is shp')
+            vector_use = gpd.read_file(use)
+        elif Path(use).suffix == '.tif':
+            raster_use = rxr.open_rasterio(use).isel(band=0).drop('band')
+            logger.debug('use is tif')
+    except:
+        if type(use) is gpd.geodataframe.GeoDataFrame:
+            logger.debug('geopandas')
+            vector_use = use
+        elif type(use) is xr.core.dataarray.DataArray:
+            logger.debug('xr')
+            raster_use = use
+        else:
+            logger.debug('none of the above')
+
+    if 'vector_use' in locals():
+        if len(list(vector_use.columns.drop('geometry'))) > 1:
+            raise ValueError('Too many columns in GeoDataFrame. Please provide shapefile with only one variable, other than geometry.')
+        elif len(list(vector_use.columns.drop('geometry'))) < 1:
+            raise ValueError('No columns found other than geometry. No values to burn into raster cells.')
+        raster_use = rasterize_points_add(vector_use, res=res, measurements=list(vector_use.columns.drop('geometry'))).to_dataarray()
+        logger.debug(f'rasterized vector_use to res = {res}')
+
+    raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
+    logger.debug('use_raster successfully reprojected')
+
+    # need a dataarray
+    use = rasterhd2raster(raster_use, raster_grid) # resample the use raster on our grid, with user-defined res and crs
+    logger.debug('use_raster successfully resampled')
+    use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+    #self.use = use
+    return use
+
+
 def check_particle_file(path_to_file):
     ds = xr.open_dataset(path_to_file)
     vars_to_check = ['x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind']
     for i in vars_to_check:
         if np.all(ds[i].load() == 0):
-            print(f'ATTENTION: all 0 values detected for variable {i}.')
+            logger.debug(f'ATTENTION: all 0 values detected for variable {i}.')
         else:
-            print(f'all good: variable {i} has non-zero values.')
-            
+            logger.debug(f'all good: variable {i} has non-zero values.')
+
 
 def traj_distinct(bin_n, weight):
-    print(f"bin_n: {bin_n.shape} | weight: {weight.shape}")
+    logger.debug(f"bin_n: {bin_n.shape} | weight: {weight.shape}")
     w = deepcopy(weight)
     for t in range(1,len(bin_n)): # i leave the first element as 1, otherwise the loop would compare it to the last element.
         if bin_n[t] == bin_n[t-1]:
