@@ -163,8 +163,11 @@ def harmonize_use(use, res, study_area, raster_grid):
     # need a dataarray
     use = rasterhd2raster(raster_use, raster_grid) # resample the use raster on our grid, with user-defined res and crs
     logger.debug('use_raster successfully resampled')
+    if len(use.shape) > 2:
+        use = use[0]
     use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
     #self.use = use
+    logger.debug(f'final use has shape {use.shape}')
     return use
 
 

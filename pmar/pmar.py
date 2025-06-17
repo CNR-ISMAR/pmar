@@ -77,7 +77,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context='global', pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
+    def __init__(self, context='global', readers=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -151,11 +151,15 @@ class PMAR(object):
         self.set_pressure(pressure)
 
         # define context
-        try: 
-            self.context = self.get_context(str(context))
-        except:
-            # alternatively, provide paths to readers manually
-            self.context = {'readers': dict(zip(range(0,len(context)),context))}
+        if context is not None:
+            try: 
+                self.context = self.get_context(str(context))
+            except:
+                # alternatively, provide paths to readers manually
+                self.context = {'readers': dict(zip(range(0,len(context)),context))}
+
+        if readers is not None:
+            self.readers = readers
         
         # if a path to a shapefile is given to be used for seeding, read it and save it in the pmar_output/polygons dir
         # why save it locally????
@@ -578,9 +582,17 @@ class PMAR(object):
         self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
         
         logger.info('adding readers...')            
+        
         readers = []
-        for var in self.context['readers']:
-            readers.append(Reader(dataset_id=self.context['readers'][var]))
+        if self.context:
+            # add predefined readers from context
+            for var in self.context['readers']:
+                readers.append(Reader(dataset_id=self.context['readers'][var]))
+        else:
+            # add datasets as readers
+            for r in self.readers:
+                readers.append(Reader(r, name='CMEMS default'))
+                
         self.o.add_reader(readers) # add all readers for that context.
         #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
         
@@ -624,7 +636,7 @@ class PMAR(object):
                 logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
 
             logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
-            self.seeding_shapefile = seeding_shapefile
+            #self.seeding_shapefile = seeding_shapefile
         
         
         # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
@@ -1064,7 +1076,7 @@ class PMAR(object):
             #self.poly_path = self.ds.poly_path
             # add weight to ds 
             # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
-            if use or emission or decay_coef != 0:
+            if use is not None or emission or decay_coef != 0:
                 self.set_weights(res=res, study_area=study_area, use=use, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
             
 
@@ -1095,7 +1107,7 @@ class PMAR(object):
                 study_area = self.extent # take whole basin
 
         
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use_path=use_path, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         self.ppi_path.append(ppi_path)
         
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
