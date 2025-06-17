@@ -12,7 +12,7 @@ from opendrift.models.plastdrift import PlastDrift
 from opendrift.models.chemicaldrift import ChemicalDrift
 #import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
-#from opendrift.readers.reader_netCDF_CF_generic import Reader
+from opendrift.readers.reader_netCDF_CF_generic import Reader as GenericReader
 import opendrift
 from pydap.client import open_url
 from pydap.cas.get_cookies import setup_session
@@ -583,17 +583,21 @@ class PMAR(object):
         
         logger.info('adding readers...')            
         
-        readers = []
-        if self.context:
+        if self.readers:
+            # add datasets as readers. added for sl application
+            for id,r in enumerate(self.readers):
+                reader = GenericReader(r, name=f'cmems_{id}')
+                self.o.add_reader(reader)#, variables=['x_sea_water_velocity', 'y_sea_water_velocity'])
+
+        else:
+        #if self.context:
+            readers = []
             # add predefined readers from context
             for var in self.context['readers']:
                 readers.append(Reader(dataset_id=self.context['readers'][var]))
-        else:
-            # add datasets as readers
-            for r in self.readers:
-                readers.append(Reader(r, name='CMEMS default'))
-                
-        self.o.add_reader(readers) # add all readers for that context.
+            self.o.add_reader(readers) # add all readers for that context.
+
+
         #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
         
         # uncertainty
