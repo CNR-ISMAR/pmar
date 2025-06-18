@@ -133,6 +133,7 @@ class PMAR(object):
         self.seeding_shapefile = None # can be point, line or polygon
         self.seed_within_bounds = None # if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
         self.loglevel = loglevel
+        self.readers = readers
         
         # set up logger 
         logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
@@ -157,9 +158,6 @@ class PMAR(object):
             except:
                 # alternatively, provide paths to readers manually
                 self.context = {'readers': dict(zip(range(0,len(context)),context))}
-
-        if readers is not None:
-            self.readers = readers
         
         # if a path to a shapefile is given to be used for seeding, read it and save it in the pmar_output/polygons dir
         # why save it locally????

@@ -2,6 +2,7 @@ import numpy as np
 import xarray as xr
 import rioxarray as rxr
 from copy import deepcopy
+import cartopy
 import cartopy.io.shapereader as shpreader
 import geopandas as gpd
 from rasterio.enums import Resampling
@@ -12,6 +13,7 @@ from functools import partial
 from geocube.rasterize import rasterize_image
 from rasterio.enums import MergeAlg
 import logging
+import matplotlib.pyplot as plt
 from pathlib import Path
 logger = logging.getLogger('pmar')
 
@@ -193,6 +195,25 @@ def traj_distinct(bin_n, weight):
         if bin_n[t] == bin_n[t-1]:
             w[t] = 0
     return w
+    
+
+def plot_map(coastres='10m', figsize=[8,6], dpi=120, proj=cartopy.crs.PlateCarree(),  extent=None, title=''):
+    fig = plt.figure(figsize=figsize)
+    ax = plt.axes(projection=proj)
+    ax.coastlines(coastres, zorder=12, color='k', linewidth=.7)
+    ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2, alpha=0.5)
+    ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
+    if extent is not None:
+        ax.set_extent(extent, crs=cartopy.crs.PlateCarree()) # since some values are 1e36, if i dont set this I see an empty map
+    
+    gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
+    #levels=np.array([1,10,100,1000])
+    gl.top_labels = False
+    gl.right_labels = False
+    
+    ax.set_title(title)
+    
+    return fig, ax 
     
 
 def custom_plotfunc(ds, fig, tt, *args, **kwargs):
