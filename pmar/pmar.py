@@ -912,7 +912,7 @@ class PMAR(object):
         
         return h
 
-
+    # to be deprecated
     def ppi(self, res, use=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
         '''
         Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
@@ -1058,10 +1058,6 @@ class PMAR(object):
         #     use_path = str(self.basedir)+use_path.split('/')[-1].split('.shp')[0]+'.tif'
         #     raster_use.rio.to_raster(use_path)
         #     logger.debug(f'Rasterized use: {use_path}')
-        if use is not None:
-            raster_grid = self.raster_grid(res=res, study_area=study_area)
-            use = harmonize_use(use, res, study_area=study_area, raster_grid=raster_grid)
-            self.use = use
         
         # if a file with that name already exists, simply import it  
         if file_exists == True:
@@ -1073,9 +1069,7 @@ class PMAR(object):
             #self.poly_path = self.ds.poly_path
             # add weight to ds 
             # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
-            if use is not None or emission or decay_coef != 0:
-                self.set_weights(res=res, study_area=study_area, use=use, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)
-            
+
 
         # otherwise, run requested simulation
         else:
@@ -1083,6 +1077,14 @@ class PMAR(object):
             self.ds.to_netcdf(str(file_path))
             logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
 
+
+        if use is not None:
+            raster_grid = self.raster_grid(res=res, study_area=study_area)
+            use = harmonize_use(use, res, study_area=study_area, raster_grid=raster_grid, tstep=self.ds.tstep)
+            self.use = use
+
+        # this should run whether or not there is already a particle or raster cache. so i can see the weight variable in ds.
+        self.set_weights(res=res, study_area=study_area, use=use, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)   
         
         # # create dataset where all outputs will be stored
         self.output = xr.Dataset()
@@ -1112,9 +1114,10 @@ class PMAR(object):
 
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
-        else:            
+        else:
             ppi = self.ppi(use=use, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
-
+            ppi = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=True, block_size=len(self.ds.time), weight=self.ds.weight) # weight have been assigned above, so no need to normalize or apply decay etc.
+            
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
                    
 

@@ -125,7 +125,7 @@ def rasterize_points_add(point_data, res, measurements=None):
     return raster_data
 
 
-def harmonize_use(use, res, study_area, raster_grid):
+def harmonize_use(use, res, study_area, raster_grid, tstep):
     '''
     Use can be a path to a shapefile or raster, a geopandas geodataframe or a xarray object.
     This method rasterizes use (if needed), it reprojects it to standard projection, it resamples it on given grid and within chosen bounding box. 
@@ -134,20 +134,20 @@ def harmonize_use(use, res, study_area, raster_grid):
     try:
         Path(use).suffix
         if Path(use).suffix == '.shp':
-            logger.debug('use is shp')
+            logger.debug('use is shapefile')
             vector_use = gpd.read_file(use)
         elif Path(use).suffix == '.tif':
             raster_use = rxr.open_rasterio(use).isel(band=0).drop('band')
             logger.debug('use is tif')
     except:
         if type(use) is gpd.geodataframe.GeoDataFrame:
-            logger.debug('geopandas')
+            logger.debug('use is geopandas dataframe')
             vector_use = use
         elif type(use) is xr.core.dataarray.DataArray:
-            logger.debug('xr')
+            logger.debug('use is xarray')
             raster_use = use
         else:
-            logger.debug('none of the above')
+            logger.debug('use is none of the above')
 
     if 'vector_use' in locals():
         if len(list(vector_use.columns.drop('geometry'))) > 1:
@@ -165,9 +165,12 @@ def harmonize_use(use, res, study_area, raster_grid):
     logger.debug('use_raster successfully resampled')
     if len(use.shape) > 2:
         use = use[0]
+        
     use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
 
-    use = use
+    # convert use from quantity/day into quantity/timestep
+    timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
+    use = use / timesteps_per_day
     
     logger.debug(f'final use has shape {use.shape}')
     return use
