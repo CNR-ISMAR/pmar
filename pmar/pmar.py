@@ -773,15 +773,7 @@ class PMAR(object):
         study_area : list, optional
             Spatial bounds for computation of raster over a subregion, written as [x1,y1,x2,y2]. Default is None (bounds are taken from self.)
         '''
-        logger.info('applying use weight...')
-        # grid = self.polygon_grid(res, study_area=study_area)
-        # poly_bounds = grid.total_bounds
-        
-        # _use = rxr.open_rasterio(use_path).rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').isel(band=0).drop('band').sel(x=slice(poly_bounds[0], poly_bounds[2]), y=slice(poly_bounds[1], poly_bounds[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
-        # gr = self.raster_grid(res=res, study_area=study_area)
-        
-        # use = rasterhd2raster(_use, gr) # resample the use raster on our grid, with user-defined res and crs
-        # use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+        logger.info("sampling use value at particles' starting locations..")
         self.use = use
         
         use_value = use.sel(x=self.ds.isel(time=0).lon, y=self.ds.isel(time=0).lat,  method='nearest')
@@ -809,7 +801,8 @@ class PMAR(object):
 
     def normalize_weight(self, weight, res, study_area=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
-        self.ds = self.get_bin_n(res=res, t=0, study_area=study_area)
+        bin_n_t0 = self.get_bin_n(res=res, t=0, study_area=study_area)
+        self.ds['bin_n_t0'] = bin_n_t0
         logger.info('weight_by_bin...')
         weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n_t0.load()) # added load otherwise groupby raises error
         #logger.info('done.') 
@@ -820,7 +813,12 @@ class PMAR(object):
         return normalized_weight
 
     def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=False):
-        
+        '''
+        Associate weights with each trajectory. 
+        ORDER OF OPERATIONS MATTERS.
+        Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).  
+        '''
+            
         if use is not None:
             # extract value of use at starting position of each trajectory
             use_value = self.use_by_traj(use=use, res=res, study_area=study_area)
@@ -830,26 +828,19 @@ class PMAR(object):
             self.emission = emission * self.ds.tstep / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
             logger.info(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             weight = weight*self.emission
-        
-        if decay_coef != 0:
-        # decay rate. default is no decay, but this is still useful to give weight the correct shape
-            logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
-            y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
-            weight = weight*y
 
-        # broadcasting to correct shape
-        weight = xr.DataArray(weight).broadcast_like(self.ds.lon)
-        
         if normalize is True:
-            weight = self.normalize_weight(weight, res=res, study_area=study_area)
-            logger.info('weight normalized by number of particles in bin at t0.')
+            weight = self.normalize_weight(weight=weight, res=res, study_area=study_area)
+            logger.info('weight normalized by number of particles in bin at t0.')        
+            
+        # decay rate. default is no decay, but this is still useful to give weight the correct shape
+        logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
+        y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
+        weight = weight*y
 
-        # ASSIGN needs to be LAST, otherwise would be assigning the wrong weight
         if assign is True:
-            #self.ds = self.assign_weight(weight)
             self.ds = self.ds.assign({'weight': (('trajectory', 'time'), weight.data)}) 
             logger.info('updating weight variable in ds')
-            #self.ds.to_netcdf(self.particle_path)
 
         return weight
     
@@ -866,7 +857,7 @@ class PMAR(object):
         '''
       
         grid = self.polygon_grid(res, study_area=study_area)
-        ds = self.get_ds
+        ds = self.ds
         # calculate bin number of each trajectory at time 0, assign it to variable bin_n_t0
         _bins = np.zeros((len(grid),2)) 
         #print(_bins.shape)
@@ -875,14 +866,16 @@ class PMAR(object):
         func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
         #print('bin_n ufunc')
         try:
-            ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
+            #ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
+            bin_n = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
             logger.info(f'calculated bin number at timestep {t}')
             #print('bin_n_t0 done.')
         except:
             logger.info(f'Calculating bin_n at all timesteps {t}.')
-            ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
+            #ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
+            bin_n = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
             
-        return ds
+        return bin_n
 
     def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use=None, emission=None, decay_coef=0):
         '''
