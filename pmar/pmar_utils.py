@@ -115,19 +115,20 @@ def rasterhd2raster(raster_hd, grid):
              )                                                                                                                                                                          
     return raster 
     
-def rasterize_points_add(point_data, res, measurements=None):
+def rasterize_points_add(point_data, like, measurements=None):
     '''
     Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
     '''
     raster_data = make_geocube(vector_data=point_data, measurements=measurements, 
-                    resolution=(-res, res), 
+                    like=like,
+                    #resolution=(-res, res), 
                     fill=0,
                     rasterize_function=partial(rasterize_image, merge_alg=MergeAlg.add, fill=0, all_touched=True, filter_nan=True))
     logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
     return raster_data
 
 
-def harmonize_use(use, res, study_area, raster_grid, tstep):
+def harmonize_use(use, res, study_area, like, tstep):
     '''
     Use can be a path to a shapefile or raster, a geopandas geodataframe or a xarray object.
     This method rasterizes use (if needed), it reprojects it to standard projection, it resamples it on given grid and within chosen bounding box. 
@@ -138,16 +139,20 @@ def harmonize_use(use, res, study_area, raster_grid, tstep):
         if Path(use).suffix == '.shp':
             logger.debug('use is shapefile')
             vector_use = gpd.read_file(use)
+            print('SHP USE TOTAL BOUNDS', vector_use.total_bounds)
         elif Path(use).suffix == '.tif':
             raster_use = rxr.open_rasterio(use).isel(band=0).drop('band')
+            print('TIF USE TOTAL BOUNDS', raster_use.lon.min(), raster_use.lon.max(), raster_use.lat.min(), raster_use.lat.max())            
             logger.debug('use is tif')
     except:
         if type(use) is gpd.geodataframe.GeoDataFrame:
             logger.debug('use is geopandas dataframe')
             vector_use = use
+            print('GPD USE TOTAL BOUNDS', vector_use.total_bounds)
         elif type(use) is xr.core.dataarray.DataArray:
             logger.debug('use is xarray')
             raster_use = use
+            print('RXR USE TOTAL BOUNDS', raster_use.lon.min(), raster_use.lon.max(), raster_use.lat.min(), raster_use.lat.max()) 
         else:
             logger.debug('use is none of the above')
 
@@ -156,14 +161,16 @@ def harmonize_use(use, res, study_area, raster_grid, tstep):
             raise ValueError('Too many columns in GeoDataFrame. Please provide shapefile with only one variable, other than geometry.')
         elif len(list(vector_use.columns.drop('geometry'))) < 1:
             raise ValueError('No columns found other than geometry. No values to burn into raster cells.')
-        raster_use = rasterize_points_add(vector_use, res=res, measurements=list(vector_use.columns.drop('geometry'))).to_dataarray()
+        raster_use = rasterize_points_add(vector_use, like=like, measurements=list(vector_use.columns.drop('geometry'))).to_dataarray()
         logger.debug(f'rasterized vector_use to res = {res}')
-
+        print('Rasterized USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
+        
     raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
     logger.debug('use_raster successfully reprojected')
-
+    print('Rasterized USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
     # need a dataarray
-    use = rasterhd2raster(raster_use, raster_grid) # resample the use raster on our grid, with user-defined res and crs
+    use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
+    print('Resampled USE TOTAL BOUNDS', use.x.min(), use.x.max(), use.y.min(), use.y.max()) 
     logger.debug('use_raster successfully resampled')
     if len(use.shape) > 2:
         use = use[0]

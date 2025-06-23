@@ -45,8 +45,8 @@ import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, rasterhd2raster, check_particle_file, get_marine_polygon, make_poly, harmonize_use
-
+from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use
+from xgcm import Grid
 
 logger = logging.getLogger('pmar')
 #logger.setLevel(logging.DEBUG)
@@ -325,6 +325,41 @@ class PMAR(object):
         _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
         self._raster_grid = _raster_grid.weight
         return self._raster_grid
+
+    def xgrid(self, res, study_area=None, crs='epsg:4326'):
+        xmin, ymin, xmax, ymax = study_area
+        cols = np.arange(xmin, xmax + res, res)            
+        rows = np.arange(ymin, ymax + res, res)
+
+        # outer cell edges
+        x_e = cols 
+        y_e = rows
+        
+        # cell centres
+        x_c = (x_e + res/2)[:-1]
+        y_c = (y_e + res/2)[:-1]     
+
+        xgrid = xr.Dataset(coords={'x_e':x_e, 'y_e':y_e, 'x_c':x_c, 'y_c':y_c})
+
+        xgrid['dx'] = xgrid['dy'] = res
+
+        Xc, Yc = np.meshgrid(xgrid.x_c, xgrid.y_c)
+        xgrid = xgrid.assign({'Xc': (('y_c', 'x_c'), Xc), 'Yc': (('y_c', 'x_c'), Yc)}) #dataarrays 
+
+        xgrid = xgrid.assign({'bin_n': (('y_c','x_c'), np.arange(0,Xc.size).reshape((len(y_c), len(x_c)))
+)})
+        
+        xgrid.rio.write_crs(crs, inplace=True)
+        
+        grid = Grid(xgrid, 
+                    coords={"X": {"center": "x_c", "outer": "x_e"}, 
+                           'Y': {"center": "y_c", "outer": "y_e"}}, 
+                    metrics = {
+            ('X',): ['dx'], # X distances
+            ('Y',): ['dy']},
+                   periodic=False)
+
+        return xgrid
 
     @property
     def get_ds(self):
@@ -854,25 +889,30 @@ class PMAR(object):
             index of timestep to consider
         '''
       
-        grid = self.polygon_grid(res, study_area=study_area)
+        #grid = self.polygon_grid(res, study_area=study_area)
         ds = self.ds
         # calculate bin number of each trajectory at time 0, assign it to variable bin_n_t0
-        _bins = np.zeros((len(grid),2)) 
+        #_bins = np.zeros((len(grid),2)) 
         #print(_bins.shape)
-        _bins[:,0] = np.array(grid.centroid.x) 
-        _bins[:,1] = np.array(grid.centroid.y)  
-        func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
+        #_bins[:,0] = np.array(grid.centroid.x) 
+        #_bins[:,1] = np.array(grid.centroid.y)  
+
+        #_bins = np.array(list(zip(self.grid.Xc.data.ravel(), self.grid.Yc.data.ravel())))
+        
+        #func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
         #print('bin_n ufunc')
         try:
             #ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
-            bin_n = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
+            #bin_n = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
+            bin_n = self.grid.bin_n.sel(x_c=self.ds.isel(time=t).lon, y_c=self.ds.isel(time=t).lat, method='nearest')
             logger.info(f'calculated bin number at timestep {t}')
             #print('bin_n_t0 done.')
         except:
             logger.info(f'Calculating bin_n at all timesteps {t}.')
             #ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
-            bin_n = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
-            
+            #bin_n = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
+            bin_n = self.grid.bin_n.sel(x_c=self.ds.lon, y_c=self.ds.lat, method='nearest')
+        
         return bin_n
 
     def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use=None, emission=None, decay_coef=0):
@@ -892,9 +932,12 @@ class PMAR(object):
         if self.seedings > 1:
             logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
 
-        self.polygon_grid(res, study_area=study_area)
-        xbin = self._x_e
-        ybin = self._y_e
+        #self.polygon_grid(res, study_area=study_area)
+        #xbin = self._x_e
+        #ybin = self._y_e
+
+        xbin = self.grid.x_e
+        ybin = self.grid.y_e
         
         #self.get_ds
         
@@ -937,9 +980,10 @@ class PMAR(object):
         
         if use is None:
             logger.info('no use provided. calculating ppi from unity-use.')
-            self.raster_grid(res=res, study_area=study_area).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
+            #self.raster_grid(res=res, study_area=study_area).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
             #self.use_path = Path (self.basedir / 'unity-use.tif')
-            self.use = self.raster_grid
+            #self.use = self.raster_grid
+            self.use = xr.ones_like(self.grid.Xc)
         
         # if emission is not None:
         #     self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
@@ -1048,7 +1092,7 @@ class PMAR(object):
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
         #self.particle_path = str(file_path)
         self.particle_path.append(file_path) 
-
+        self.grid = self.xgrid(res=res, study_area = study_area) # should be in init?
         #if use_path is a shapefile, rasterize it using geocube (NB: only tested with points)
         # if use_path and Path(use_path).suffix == '.shp':
         #     vector_use = gpd.read_file(use_path)
@@ -1077,8 +1121,8 @@ class PMAR(object):
 
 
         if use is not None:
-            raster_grid = self.raster_grid(res=res, study_area=study_area)
-            use = harmonize_use(use, res, study_area=study_area, raster_grid=raster_grid, tstep=self.ds.tstep)
+            #raster_grid = self.raster_grid(res=res, study_area=study_area)
+            use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}), tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
             self.use = use
 
         # this should run whether or not there is already a particle or raster cache. so i can see the weight variable in ds.
