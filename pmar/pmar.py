@@ -119,11 +119,7 @@ class PMAR(object):
         self.tshift = None
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
-        self._polygon_grid = None
-        self._x_e = None
-        self._y_e = None
-        self._x_c = None
-        self._y_c = None
+        self.grid = None
         self.res = None
         self.weight = None
         self.study_area = None
@@ -249,82 +245,6 @@ class PMAR(object):
         
         return contexts[context]
 
-    
-    def x_grid(self):
-        if self._x_e is None:
-            raise ValueError('polygon_grid needs to be called before using this method')
-        return self._x_e
-
-    def y_grid(self):
-        if self._y_e is None:
-            raise ValueError('polygon_grid needs to be called before using this method')
-        return self._y_e
-
-    def polygon_grid(self, res, study_area=None):
-        '''
-        Create grid of given resolution (res) and intersect it with poly_path.
-        '''
-
-        # todo: check crs matches too
-        if self._polygon_grid is not None and np.all(np.round((self._polygon_grid.length/4).values,8) == res) and np.all(np.round(self._polygon_grid.total_bounds,8) == study_area):
-            logger.debug(f'polygon_grid with res = {res} = {np.all(np.round((self._polygon_grid.length/4).values,8))} and study_area = {study_area} = {self._polygon_grid.total_bounds} already calculated.')
-                
-        else:        
-            logger.info(f'polygon_grid: calculating new polygon_grid with resolution = {res} and study_area = {study_area}.')
-            #res = self.res 
-            crs = 'epsg:4326' # need to use EPSG:4326 because the output of opendrift is in this epsg and i want to use this grid for the histogram of the opendrift output
-            
-            if study_area is not None: # if study_area are given, meaning we are calculating the raster on a different region than seeding, create new polygon to use for aggregation / visualisation
-                poly = make_poly(lon=[study_area[0], study_area[2]], lat=[study_area[1], study_area[3]]).to_crs('epsg:4326')#.buffer(distance=res*3)
-                logger.debug(f'making new polygon_grid using study_area = {study_area}')
-            else:
-                logger.error('PLEASE PROVIDE study_area')
-                # try:
-                #     poly = gpd.read_file(self.poly_path).to_crs(crs)#.buffer(distance=res*3) # the buffer is added because of the non-zero radius when seeding, otherwise some particles might be left out
-                # except:
-                #     poly = gpd.read_file(self.ds.poly_path).to_crs(crs) # needed because if the trajectories have been previously calculated and are taken from cache, poly_path is only stored in the trajectory file
-                #     self.poly_path = self.ds.poly_path
-                #     logger.debug('reading poly_path from ds')
-            
-            xmin, ymin, xmax, ymax = poly.total_bounds
-            
-            cols = list(np.arange(xmin, xmax + res, res))               
-            rows = list(np.arange(ymin, ymax + res, res)) 
-            
-            polygons = [] 
-            #print('polygon_grid: starting for loop...')
-            for y in rows[:-1]:                
-                for x in cols[:-1]:    
-                    polygons.append(Polygon([(x,y),
-                                             (x+res, y),
-                                             (x+res, y+res),
-                                             (x, y+res)]))
-            #print('polygon_grid: for loop done!')
-            
-            grid = gpd.GeoDataFrame({'geometry':polygons}, crs=crs)  
-    
-            #print('intersecting grid with poly')
-            intersect = grid[grid.intersects(poly.geometry[0])].reset_index()
-            self._polygon_grid = intersect
-            
-            self._x_e = np.array(cols) # outer edge coordinates
-            self._y_e = np.array(rows)
-            self._x_c = np.unique(self._polygon_grid.centroid.x.values) # centroid coordinates .round(4)
-            self._y_c = np.unique(self._polygon_grid.centroid.y.values)
-                
-            #print('polygon_grid: done.')
-            self.res = res
-            logger.info(f'updated self.res = {self.res}')
-                
-        return self._polygon_grid
-
-    def raster_grid(self, res=None, study_area=None):
-        logger.info(f'rasterizing grid with extent = {study_area}')
-        grid = self.polygon_grid(res=res, study_area=study_area)
-        grid['weight'] = 1
-        _raster_grid = make_geocube(vector_data=self._polygon_grid, measurements=["weight"], resolution=(-res, res))
-        self._raster_grid = _raster_grid.weight
-        return self._raster_grid
 
     def xgrid(self, res, study_area=None, crs='epsg:4326'):
         xmin, ymin, xmax, ymax = study_area
@@ -889,29 +809,13 @@ class PMAR(object):
             index of timestep to consider
         '''
       
-        #grid = self.polygon_grid(res, study_area=study_area)
         ds = self.ds
-        # calculate bin number of each trajectory at time 0, assign it to variable bin_n_t0
-        #_bins = np.zeros((len(grid),2)) 
-        #print(_bins.shape)
-        #_bins[:,0] = np.array(grid.centroid.x) 
-        #_bins[:,1] = np.array(grid.centroid.y)  
-
-        #_bins = np.array(list(zip(self.grid.Xc.data.ravel(), self.grid.Yc.data.ravel())))
-        
-        #func = lambda plon, plat: np.abs(_bins-[plon,plat]).sum(axis=1).argmin()
-        #print('bin_n ufunc')
         try:
-            #ds['bin_n_t0'] = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
-            #bin_n = xr.apply_ufunc(func, ds.isel(time=t).lon, ds.isel(time=t).lat, vectorize=True, dask='parallelized')
             bin_n = self.grid.bin_n.sel(x_c=self.ds.isel(time=t).lon, y_c=self.ds.isel(time=t).lat, method='nearest')
-            logger.info(f'calculated bin number at timestep {t}')
-            #print('bin_n_t0 done.')
+            logger.info(f'calculated bin number at timestep {t}.')
         except:
-            logger.info(f'Calculating bin_n at all timesteps {t}.')
-            #ds['bin_n'] = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
-            #bin_n = xr.apply_ufunc(func, ds.lon.chunk({'trajectory': len(ds.trajectory)/10}), ds.lat.chunk({'trajectory': len(ds.trajectory)/10}), vectorize=True, dask='parallelized')
             bin_n = self.grid.bin_n.sel(x_c=self.ds.lon, y_c=self.ds.lat, method='nearest')
+            logger.info(f'calculated bin number at all timesteps.')
         
         return bin_n
 
@@ -931,10 +835,6 @@ class PMAR(object):
 
         if self.seedings > 1:
             logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
-
-        #self.polygon_grid(res, study_area=study_area)
-        #xbin = self._x_e
-        #ybin = self._y_e
 
         xbin = self.grid.x_e
         ybin = self.grid.y_e
@@ -980,9 +880,6 @@ class PMAR(object):
         
         if use is None:
             logger.info('no use provided. calculating ppi from unity-use.')
-            #self.raster_grid(res=res, study_area=study_area).rio.to_raster(self.basedir / 'unity-use.tif') # unity weight use grid
-            #self.use_path = Path (self.basedir / 'unity-use.tif')
-            #self.use = self.raster_grid
             self.use = xr.ones_like(self.grid.Xc)
         
         # if emission is not None:
@@ -1121,7 +1018,6 @@ class PMAR(object):
 
 
         if use is not None:
-            #raster_grid = self.raster_grid(res=res, study_area=study_area)
             use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}), tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
             self.use = use
 
