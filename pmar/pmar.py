@@ -1324,11 +1324,11 @@ class PMAR(object):
             ds = self.ds.isel(time=t)
 
         # subset of trajectories
-        O = np.floor(np.log10(len(self.ds.trajectory)))
+        O = np.floor(np.log10(len(ds.trajectory)))
         if O > 3:
-            ds = self.ds.isel(trajectory=slice(None,None,int(len(self.ds.trajectory)/10**(O-1))))
+            ds = ds.isel(trajectory=slice(None,None,int(len(ds.trajectory)/10**(O-1))))
         else:
-            ds = self.ds
+            ds = ds
       
         
         if c == 'age': 
