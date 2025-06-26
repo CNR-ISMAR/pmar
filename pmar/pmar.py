@@ -46,7 +46,7 @@ from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
 from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use
-from xgcm import Grid
+#from xgcm import Grid
 
 logger = logging.getLogger('pmar')
 #logger.setLevel(logging.DEBUG)
@@ -271,13 +271,13 @@ class PMAR(object):
         
         xgrid.rio.write_crs(crs, inplace=True)
         
-        grid = Grid(xgrid, 
-                    coords={"X": {"center": "x_c", "outer": "x_e"}, 
-                           'Y': {"center": "y_c", "outer": "y_e"}}, 
-                    metrics = {
-            ('X',): ['dx'], # X distances
-            ('Y',): ['dy']},
-                   periodic=False)
+        # grid = Grid(xgrid, 
+        #             coords={"X": {"center": "x_c", "outer": "x_e"}, 
+        #                    'Y': {"center": "y_c", "outer": "y_e"}}, 
+        #             metrics = {
+        #     ('X',): ['dx'], # X distances
+        #     ('Y',): ['dy']},
+        #            periodic=False)
 
         return xgrid
 
