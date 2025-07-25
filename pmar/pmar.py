@@ -753,26 +753,37 @@ class PMAR(object):
         ORDER OF OPERATIONS MATTERS.
         Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).  
         '''
-            
+
+        if type(weight) is int:
+            weight = xr.DataArray(weight)
+        
         if use is not None:
             # extract value of use at starting position of each trajectory
             use_value = self.use_by_traj(use=use, res=res, study_area=study_area)
-            weight = use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
+            weight = weight*use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
+            # (trajectory)
+        #else:
+         #   weight=xr.ones_like(self.ds.lon) # needed to give weights the correct shape in all possible cases
 
         if emission is not None:
             self.emission = emission * self.ds.tstep / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
             logger.info(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             weight = weight*self.emission
-
+        # (time)
+        
         if normalize is True:
             weight = self.normalize_weight(weight=weight, res=res, study_area=study_area)
             logger.info('weight normalized by number of particles in bin at t0.')        
-            
-        # decay rate. default is no decay, but this is still useful to give weight the correct shape
-        logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
-        y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
-        weight = weight*y
 
+        if decay_coef != 0:
+        # decay rate. default is no decay, but this is still useful to give weight the correct shape
+            logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
+            y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
+            weight = weight*y
+
+        # give weight correct shape
+        weight = weight.broadcast_like(self.ds.lon)
+        
         if assign is True:
             self.ds = self.ds.assign({'weight': (('trajectory', 'time'), weight.data)}) 
             logger.info('updating weight variable in ds')
