@@ -848,8 +848,14 @@ class PMAR(object):
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
             
         h = h.transpose().rename({'lon_bin':'x', 'lat_bin':'y'}) # important to not have it where(h>0) otherwise it misses values when summing
+
+        r = (
+            xr.DataArray(h) 
+            .rio.write_nodata(np.nan)
+            .rio.write_crs('epsg:4326')
+            .rio.write_coordinate_system())
         
-        return h
+        return r
 
     # to be deprecated
     def ppi(self, res, use=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
@@ -891,7 +897,7 @@ class PMAR(object):
         #self.ds = self.get_ds
         
         r = self.get_histogram(res=res, study_area=study_area, normalize=True, assign=True, block_size=len(self.ds.time), use=use, decay_coef=decay_coef, emission=emission)#.assign_attrs({'use_path': use_path, 'emission':emission})
-
+        
         return r
 
 
@@ -1113,9 +1119,12 @@ class PMAR(object):
         #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
 
-        self.output['sum'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).sum('time')
-        self.output['max'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).max('time')
-        self.output['q9'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).quantile(q=.9, dim='time')
+        # other outputs
+        _h = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory'])
+        
+        self.output['sum'] = _h.sum('time').rio.reproject_match(self.output['ppi'])
+        self.output['max'] = _h.max('time').rio.reproject_match(self.output['ppi'])
+        self.output['q9'] = _h.quantile(q=.9, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.output['ppi']) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
         
         pass
 
