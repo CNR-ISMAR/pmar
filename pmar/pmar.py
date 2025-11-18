@@ -458,25 +458,25 @@ class PMAR(object):
         
         self.tstep = tstep
 
-        if seed_within_bounds is not None:
-            lon = seed_within_bounds[0::2]
-            lat = seed_within_bounds[1::2]  
-            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-            q = self.basedir / 'polygons' / poly_path
-            make_poly(lon, lat, crs=crs, save_to=str(q))
-            self.seeding_shapefile = str(q)
-            logger.info(f'seeding within bounds {lon},{lat}')
-        else: 
-            # not needed anymore. seed_from_shapefile accepts point features
-            # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
-            self.seeding_shapefile = seeding_shapefile
-            if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
-                seeding_poly = gpd.read_file(self.seeding_shapefile)
-                seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
-                new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
-                seeding_poly.to_file(new_seeding_shapefile)
-                self.seeding_shapefile = str(new_seeding_shapefile)
-                logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
+        # if seed_within_bounds is not None:
+        #     lon = seed_within_bounds[0::2]
+        #     lat = seed_within_bounds[1::2]  
+        #     poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+        #     q = self.basedir / 'polygons' / poly_path
+        #     make_poly(lon, lat, crs=crs, save_to=str(q))
+        #     self.seeding_shapefile = str(q)
+        #     logger.info(f'seeding within bounds {lon},{lat}')
+        # else: 
+        #     # not needed anymore. seed_from_shapefile accepts point features
+        #     # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
+        #     self.seeding_shapefile = seeding_shapefile
+        if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
+            seeding_poly = gpd.read_file(self.seeding_shapefile)
+            seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
+            new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
+            seeding_poly.to_file(new_seeding_shapefile)
+            self.seeding_shapefile = str(new_seeding_shapefile)
+            logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
 
             logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
             #self.seeding_shapefile = seeding_shapefile
@@ -599,7 +599,7 @@ class PMAR(object):
         self.o.run(duration=duration, #end_time=end_time, 
                    time_step=time_step, #time_step_output=timedelta(hours=24), 
                    outfile=temp_outfile, 
-                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level'])#, 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie',])# 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
         elapsed = (T.time() - t_0)
         logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -734,14 +734,19 @@ class PMAR(object):
 
     def normalize_weight(self, weight, res, study_area=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
-        #bin_n_t0 = self.get_bin_n(res=res, t=0, study_area=study_area)
-        bin_n = self.get_bin_n(res=res, study_area=study_area)        
-        #self.ds['bin_n_t0'] = bin_n_t0
-        self.ds['bin_n'] = bin_n
-        logger.info('weight_by_bin...')
-        weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n.load()) # added load otherwise groupby raises error
+        bin_n_t0 = self.get_bin_n(res=res, t=0, study_area=study_area)
+        self.ds['bin_n_t0'] = bin_n_t0
+        weight_by_bin = weight.groupby(self.ds.bin_n_t0.load()) # added load otherwise groupby raises error
+        counts_per_bin = self.ds.bin_n_t0.groupby(self.ds.bin_n_t0).count()
+
+        # bin_n = self.get_bin_n(res=res, study_area=study_area)        
+        # self.ds['bin_n'] = bin_n
+        # logger.info('weight_by_bin...')
+        # weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n.load()) # added load otherwise groupby raises error
+
         #logger.info('done.') 
-        counts_per_bin = self.ds.isel(time=0).bin_n.groupby(self.ds.isel(time=0).bin_n).count()
+        #counts_per_bin = self.ds.isel(time=0).bin_n.groupby(self.ds.isel(time=0).bin_n).count()
+        
         logger.info('counts_per_bin...')
         normalized_weight = weight_by_bin/counts_per_bin 
         #logger.info('done.')
@@ -978,19 +983,45 @@ class PMAR(object):
         #### SPATIAL DOMAIN
         # establish study area
         if seeding_shapefile is not None and seed_within_bounds is not None:
-            raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
-        elif seeding_shapefile is None:
-            if study_area is None:
-                if seed_within_bounds is None:
-                    logger.warning('No study area provided. Taking the whole basin as spatial domain. This may take up a lot of memory.')
-                    seed_within_bounds = self.extent
-                study_area = seed_within_bounds
-            elif study_area is not None:
-                if seed_within_bounds is None:
-                    seed_within_bounds = study_area
-        elif seeding_shapefile is not None:
-            study_area = gpd.read_file(seeding_shapefile).total_bounds
+             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
+#         elif seeding_shapefile is None:
+#             if study_area is None:
+#                 if seed_within_bounds is None:
+#                     logger.warning('No study area provided. Taking the whole basin as spatial domain. This may take up a lot of memory.')
+# #                    seed_within_bounds = self.extent
+#                 study_area = seed_within_bounds
+#             elif study_area is not None:
+#                 if seed_within_bounds is None:
+#                     seed_within_bounds = study_area
+#         elif seeding_shapefile is not None:
+#             if study_area is None:
+#                 study_area = gpd.read_file(seeding_shapefile).total_bounds
+        if seed_within_bounds is None and seeding_shapefile is None:
+            seed_within_bounds = self.context['extent']
         
+        if seed_within_bounds is not None:
+#            seeding_shapefile = make_poly(seed_within_bounds)
+            lon = seed_within_bounds[0::2]
+            lat = seed_within_bounds[1::2]  
+            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+            q = self.basedir / 'polygons' / poly_path
+            make_poly(lon, lat, crs=crs, save_to=str(q))
+            seeding_shapefile = str(q)
+            logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
+
+        if study_area is None:
+            study_area = self.context['extent']
+            
+#         if seeding_shapefile is None:
+# #            seeding_shapefile = make_poly(study_area)
+#             lon = study_area[0::2]
+#             lat = study_area[1::2]  
+#             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+#             q = self.basedir / 'polygons' / poly_path
+#             make_poly(lon, lat, crs=crs, save_to=str(q))
+#             seeding_shapefile = str(q)
+#             logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
+
         self.study_area = study_area
         self.seeding_shapefile = seeding_shapefile 
         self.seed_within_bounds = seed_within_bounds
@@ -1053,13 +1084,14 @@ class PMAR(object):
         if output_dir is not None:
             self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
 
-#        if not study_area:
-#            if seed_within_bounds:
-#                study_area = seed_within_bounds
-#            elif seeding_shapefile:
-#                study_area = gpd.read_file(seeding_shapefile).total_bounds
-#            else:
-#                study_area = self.extent # take whole basin
+        # if not study_area:
+        #     raise ValueError('provide study_area')
+        #    if seed_within_bounds:
+        #        study_area = seed_within_bounds
+        #    elif seeding_shapefile:
+        #        study_area = gpd.read_file(seeding_shapefile).total_bounds
+        #    else:
+        #        study_area = self.extent # take whole basin
 
         
         ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
@@ -1071,7 +1103,7 @@ class PMAR(object):
         if ppi_exists == True:
             self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
         else:
-            ppi = self.ppi(use=use, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
+            #ppi = self.ppi(use=use, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
             ppi = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=True, block_size=len(self.ds.time), weight=self.ds.weight) # weight have been assigned above, so no need to normalize or apply decay etc.
             
             self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 

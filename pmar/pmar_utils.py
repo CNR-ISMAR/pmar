@@ -110,7 +110,7 @@ def rasterhd2raster(raster_hd, grid):
     '''
     raster = (raster_hd                                                                 
               .rio.reproject_match(grid, nodata=0, resampling=Resampling.sum)
-              .where(~grid.isnull())
+#              .where(~grid.isnull())
               .rio.write_nodata(0) # trying nodata = 0 to see if it fixes negative values problem
              )                                                                                                                                                                          
     return raster 
@@ -128,23 +128,24 @@ def rasterize_points_add(point_data, like, measurements=None):
     return raster_data
 
 
-def harmonize_use(use, res, study_area, like, tstep):
+def harmonize_use(use, res, study_area, like, tstep=None):
     '''
     Use can be a path to a shapefile or raster, a geopandas geodataframe or a xarray object.
     This method rasterizes use (if needed), it reprojects it to standard projection, it resamples it on given grid and within chosen bounding box. 
     Use is now compatible with PMAR run and ready to be assigned as weight to particles. 
     '''
     try:
-        Path(use).suffix
+        #Path(use).suffix
         if Path(use).suffix == '.shp':
             logger.debug('use is shapefile')
             vector_use = gpd.read_file(use)
             print('SHP USE TOTAL BOUNDS', vector_use.total_bounds)
         elif Path(use).suffix == '.tif':
-            raster_use = rxr.open_rasterio(use).isel(band=0).drop('band')
-            print('TIF USE TOTAL BOUNDS', raster_use.lon.min(), raster_use.lon.max(), raster_use.lat.min(), raster_use.lat.max())            
+            raster_use = rxr.open_rasterio(use).squeeze()
+            print('TIF USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max())            
             logger.debug('use is tif')
-    except:
+
+    except:     
         if type(use) is gpd.geodataframe.GeoDataFrame:
             logger.debug('use is geopandas dataframe')
             vector_use = use
@@ -152,7 +153,7 @@ def harmonize_use(use, res, study_area, like, tstep):
         elif type(use) is xr.core.dataarray.DataArray:
             logger.debug('use is xarray')
             raster_use = use
-            print('RXR USE TOTAL BOUNDS', raster_use.lon.min(), raster_use.lon.max(), raster_use.lat.min(), raster_use.lat.max()) 
+            print('RXR USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
         else:
             logger.debug('use is none of the above')
 
@@ -178,8 +179,8 @@ def harmonize_use(use, res, study_area, like, tstep):
     use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
 
     # convert use from quantity/day into quantity/timestep
-    timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
-    use = use / timesteps_per_day
+    # timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
+    # use = use / timesteps_per_day
     
     logger.debug(f'final use has shape {use.shape}')
     return use
