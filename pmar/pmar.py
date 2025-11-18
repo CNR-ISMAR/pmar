@@ -599,7 +599,7 @@ class PMAR(object):
         self.o.run(duration=duration, #end_time=end_time, 
                    time_step=time_step, #time_step_output=timedelta(hours=24), 
                    outfile=temp_outfile, 
-                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie',])# 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
 
         elapsed = (T.time() - t_0)
         logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -1113,6 +1113,10 @@ class PMAR(object):
         #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
 
+        self.output['sum'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).sum('time')
+        self.output['max'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).max('time')
+        self.output['q9'] = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory']).quantile(q=.9, dim='time')
+        
         pass
 
     
