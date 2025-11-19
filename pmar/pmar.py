@@ -330,63 +330,6 @@ class PMAR(object):
         '''
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
-
-    def _make_poly(self, lon, lat, crs='4326', save_to=True):
-        """
-        Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile. 
-        
-        Parameters
-        ----------
-        lon : list or array
-            Either a list giving 2 bounds or an array of lon coordinates.
-        lat : list or array
-            Either a list giving 2 bounds or an array of lat coordinates.
-        crs : str, optional
-            EPSG string for Polygon crs. Default is '4326'
-        write : bool, optional
-            Whether to save the polygon as a shapefile in the 's' directory. Default is True
-        """
-        
-        
-        Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-        poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-        q = self.basedir / 'polygons' / poly_path
-        
-        if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
-            _df = pd.DataFrame() # create dataframe 
-            _df['lon'] = lon # add lon and lat arrays
-            _df['lat'] = lat
-            _df['geometry'] = Polygon(zip([lon[0],lon[0],lon[1],lon[1]], [lat[0],lat[1],lat[1],lat[0]]))
-            poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
-
-        elif len(np.array(lon)) > 2 and len(np.array(lat)) > 2:
-            x, y = np.meshgrid(lon, lat)
-
-            _df = pd.DataFrame() # create dataframe 
-            _df['lon'] = x.ravel() # add lon and lat arrays
-
-            _df['lat'] = y.ravel()
-            _df['geometry'] = _df.apply(lambda r: Point(r.lon, r.lat), axis=1) # create point geometries
-
-            df = gpd.GeoDataFrame(_df, geometry="geometry") # transform into geodataframe
-
-            # buffer. cap_style = 3 means a square buffer. (creates square around centroid with distance 'res' between centroid and side)
-            buffer = df['geometry'].buffer(np.diff(lon).mean(), cap_style = 3)
-            # add buffered polygon to geo df
-            df['squares'] = buffer
-            gds = gpd.GeoDataFrame(df, geometry="squares")
-            # create polygon by dissolving squares into each other
-            poly = gds.dissolve()
-            # set crs and reproject to desired crs 
-            poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
-        else:
-            raise ValueError("'lon' and 'lat' must have length larger than 2")
-        
-        if save_to is not None:
-            poly.to_file(str(save_to), driver='ESRI Shapefile')
-            #self.poly_path = str(q)
-    
-        return poly
     
     def get_trajectories(self, pnum, start_time, season=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
         """
@@ -1007,13 +950,16 @@ class PMAR(object):
         
         if seed_within_bounds is not None:
 #            seeding_shapefile = make_poly(seed_within_bounds)
-            lon = seed_within_bounds[0::2]
-            lat = seed_within_bounds[1::2]  
-            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+            #lon = seed_within_bounds[0::2]
+            #lat = seed_within_bounds[1::2]  
+            #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
             q = self.basedir / 'polygons' / poly_path
-            make_poly(lon, lat, crs=crs, save_to=str(q))
+            #make_poly(lon, lat, crs=crs, save_to=str(q))
+            make_poly(seed_within_bounds, crs=crs, save_to=str(q))
             seeding_shapefile = str(q)
-            logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
+#            logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
+            logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
 
         if study_area is None:
             study_area = self.context['extent']

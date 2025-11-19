@@ -8,6 +8,7 @@ import geopandas as gpd
 from rasterio.enums import Resampling
 import pandas as pd
 from shapely.geometry import Point, Polygon
+from shapely import box
 from geocube.api.core import make_geocube
 from functools import partial
 from geocube.rasterize import rasterize_image
@@ -18,7 +19,18 @@ from pathlib import Path
 logger = logging.getLogger('pmar')
 
 
-def make_poly(lon, lat, crs='4326', save_to=None):
+def make_poly(bounds, crs='4326', save_to=None):
+    _df = pd.DataFrame()
+    _df['bounds'] = bounds
+    _df['geometry'] = box(bounds[0], bounds[1], bounds[2], bounds[3])
+    poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
+    
+    if save_to is not None:
+        poly.to_file(save_to, driver='ESRI Shapefile')
+        #self.poly_path = str(q)
+    return poly
+
+def _make_poly(lon, lat, crs='4326', save_to=None):
     """
     Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile. 
     
