@@ -21,7 +21,8 @@ logger = logging.getLogger('pmar')
 
 def make_poly(bounds, crs='4326', save_to=None):
     _df = pd.DataFrame()
-    _df['bounds'] = bounds
+    #_df['bounds'] = bounds
+    _df['ID'] = ['seeding_polygon']
     _df['geometry'] = box(bounds[0], bounds[1], bounds[2], bounds[3])
     poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
     
