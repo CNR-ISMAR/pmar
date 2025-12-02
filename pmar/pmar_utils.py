@@ -70,14 +70,16 @@ def _make_poly(lon, lat, crs='4326', save_to=None):
         df = gpd.GeoDataFrame(_df, geometry="geometry") # transform into geodataframe
 
         # buffer. cap_style = 3 means a square buffer. (creates square around centroid with distance 'res' between centroid and side)
-        buffer = df['geometry'].buffer(np.diff(lon).mean(), cap_style = 3)
+        buffer = df['geometry'].buffer(np.diff(lon).mean()/2, cap_style = 3)
         # add buffered polygon to geo df
         df['squares'] = buffer
         gds = gpd.GeoDataFrame(df, geometry="squares")
         # create polygon by dissolving squares into each other
-        poly = gds.dissolve()
+        #poly = gds.dissolve()
         # set crs and reproject to desired crs 
-        poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
+        #poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
+        poly = gds.set_crs(epsg=crs).to_crs(epsg='4326')
+
     else:
         raise ValueError("'lon' and 'lat' must have length larger than 2")
     

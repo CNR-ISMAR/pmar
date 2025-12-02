@@ -45,7 +45,7 @@ import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
 from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use
+from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
 #from xgcm import Grid
 
 logger = logging.getLogger('pmar')
@@ -798,8 +798,8 @@ class PMAR(object):
             .rio.write_crs('epsg:4326')
             .rio.write_coordinate_system())
         
-        return r
-
+        return r    
+    
     # to be deprecated
     def ppi(self, res, use=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
         '''
@@ -844,9 +844,41 @@ class PMAR(object):
         return r
 
 
+    def CM(self, cm_grid=None, res=None):
+        ds = self.ds.isel(time=[0,-1]) # currently calculating between start and end of run, but could be parametrised
+        if cm_grid is None: # if no polygons are given, consider entire grid
+            if res is not None: # if a new resolution is given, create new grid
+                grid = self.xgrid(res=res, study_area=self.study_area)
+            else: # otherwise consider existing grid defined in .run()
+                grid = self.grid
+            cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c)
+            
+        p_df = ds[['lon','lat']].to_dataframe().reset_index()
+        p_gdf = gpd.GeoDataFrame(
+                                p_df,
+                                geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
+                                crs=cm_grid.crs
+                                )
+        l = np.zeros((len(ds.time), len(ds.trajectory), len(cm_grid)))
+        for t in range(2):
+            for i, polys in enumerate(cm_grid.geometry):
+                poly = cm_grid.geometry.iloc[i]
+                l[t,:,i] = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].geometry.within(poly)
+        
+        Nij = np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        Pij = Nij.copy() #np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        
+        for i in range(len(cm_grid)):
+            for j in range(len(cm_grid)):
+                N = np.sum(l[0,:,i].astype(bool) & l[1,:,j].astype(bool)) # sums true in both arrays
+                Nij[i,j] = N
+                if l[0].sum(0)[i] > 0: # only divide if ni is >0 to avoid errors
+                    Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
+        return l, Nij, Pij    
+
+    
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
-    
     def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
         counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
         
