@@ -203,10 +203,10 @@ class PMAR(object):
                         
                         'med': 
                         {'readers':
-                         {'currents': 'med-cmcc-cur-rean-d', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                         {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                           'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
                           'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
-                          'mixed-layer': 'med-cmcc-mld-rean-d', # Mediterranean Sea Physics Reanalysis
+                          'mixed-layer': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # Mediterranean Sea Physics Reanalysis
                           'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
                          },
                          'extent': [-6, 30.19, 36.29, 45.98],
