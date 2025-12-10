@@ -112,8 +112,6 @@ def get_marine_polygon(basin=None):
 def rasterhd2raster(raster_hd, grid):   
     '''
     Reproject raster onto a new grid. 
-    #### NOTE: this method is not conservative. use and resampled use do not have the same integral. 
-    So not using in concentration method, for now. 
 
     Parameters
     ----------
@@ -173,7 +171,7 @@ def harmonize_use(use, res, study_area, like, tstep=None):
 
     if 'vector_use' in locals():
         if len(list(vector_use.columns.drop('geometry'))) > 1:
-            raise ValueError('Too many columns in GeoDataFrame. Please provide shapefile with only one variable, other than geometry.')
+            raise ValueError('Too many columns in GeoDataFrame. Please provide shapefile with only one variable to burn into raster, other than geometry.')
         elif len(list(vector_use.columns.drop('geometry'))) < 1:
             raise ValueError('No columns found other than geometry. No values to burn into raster cells.')
         raster_use = rasterize_points_add(vector_use, like=like, measurements=list(vector_use.columns.drop('geometry'))).to_dataarray()

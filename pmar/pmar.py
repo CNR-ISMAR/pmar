@@ -797,7 +797,7 @@ class PMAR(object):
             .rio.write_nodata(np.nan)
             .rio.write_crs('epsg:4326')
             .rio.write_coordinate_system())
-        
+
         return r    
     
     # to be deprecated
@@ -1124,11 +1124,11 @@ class PMAR(object):
                     r1 = r0 = rxr.open_rasterio(rep) 
                 else:
                     r0 = r1
-                    r1 = r0 + rxr.open_rasterio(rep)
+                    r1 = r0 + rxr.open_rasterio(rep)#.rio.reproject_match(r0, crs=r0.rio.crs, all_touched=True)
         
         return r1
     
-    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use=None, use_label=None, emission=None, hdiff=10, decay_coef=0, make_dt=True, make_td=True):
+    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use=None, use_label=None, emission=None, hdiff=10, decay_coef=0):
         '''
         Compute trajectories and produce ppi raster over required number of seedings. 
     
@@ -1191,7 +1191,7 @@ class PMAR(object):
             if seedings>1:
                 #rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
                 logger.debug(f'ppi_path = {self.ppi_path}')
-                self.output['ppi'] = ppi = self.sum_seedings(self.ppi_path)
+                self.output['ppi'] = ppi = (('y','x'), self.sum_seedings(self.ppi_path).squeeze().values)
             
             self.write_tiff(self.output['ppi'], path=ppi_path)
         thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
