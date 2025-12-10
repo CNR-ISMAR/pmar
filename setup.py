@@ -7,9 +7,9 @@ def read(*rnames):
 
 setup(
     name="pmar",
-    version="0.0.1",
+    version="0.15.0",
     author="Sofia Bosi",
-    author_email="sofia.bosi@ismar.cnr.it",
+    author_email="sofiabosi@cnr.it",
     description="Pressure models for marine activities",
     long_description=(read('README.md')),
     # Full list of classifiers can be found at:
