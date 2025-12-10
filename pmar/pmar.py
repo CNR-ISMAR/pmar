@@ -844,8 +844,8 @@ class PMAR(object):
         return r
 
 
-    def CM(self, cm_grid=None, res=None):
-        ds = self.ds.isel(time=[0,-1]) # currently calculating between start and end of run, but could be parametrised
+    def CM(self, cm_grid=None, res=None, t0=0, t1=-1):
+        ds = self.ds.isel(time=[t0,t1]) 
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
                 grid = self.xgrid(res=res, study_area=self.study_area)
