@@ -878,9 +878,13 @@ class PMAR(object):
                 Nij[i,j] = N
                 if l[0].sum(0)[i] > 0: # only divide if ni is >0 to avoid errors
                     Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
+        
+        self.CM = Pij
         return l, Nij, Pij    
 
-    def get_network(self, CM):
+    def get_network(self, CM=None):
+        if CM is None:
+            CM = self.CM
         G = nx.from_numpy_array(CM, create_using=nx.MultiDiGraph, edge_attr='weight', parallel_edges=True) # important to specify DiGraph (directed graph)
         self.network = G
         return G
