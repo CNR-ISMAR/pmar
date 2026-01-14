@@ -10,6 +10,7 @@ from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
 from opendrift.models.plastdrift import PlastDrift
 from opendrift.models.chemicaldrift import ChemicalDrift
+from opendrift.models.larvalfish import LarvalFish
 #import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
 from opendrift.readers.reader_netCDF_CF_generic import Reader as GenericReader
@@ -174,7 +175,8 @@ class PMAR(object):
                   #   'bacteria': {'opendrift_module': OceanDrift, 'termvel':0, 'decay_coef':1},
                      'chemical': {'opendrift_module': ChemicalDrift},
                      'oil': {'opendrift_module': OpenOil},
-                     'metal': {'opendrift_module': ChemicalDrift}}        
+                     'metal': {'opendrift_module': ChemicalDrift},
+                    'larvae': {'opendrift_module': LarvalFish}}        
 
         self.pressure = pressure
         self.opendrift_module = pressures[pressure]['opendrift_module']
