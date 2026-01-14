@@ -44,8 +44,8 @@ from rasterio.enums import Resampling
 import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
-from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
+from pmar.cache import PMARCache
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
 #from xgcm import Grid
 
 logger = logging.getLogger('pmar')
@@ -525,7 +525,7 @@ class PMAR(object):
         self.termvel = termvel
         self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
         #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
-        self.o.set_config('drift:vertical_mixing', True)        
+        self.o.set_config('drift:vertical_mixing', True)  
         self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
                                    terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
 
