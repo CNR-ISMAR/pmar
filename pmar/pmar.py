@@ -45,6 +45,7 @@ from rasterio.enums import Resampling
 import glob
 from copy import deepcopy
 from geocube.api.core import make_geocube
+import networkx as nx
 from pmar.cache import PMARCache
 from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
 #from xgcm import Grid
@@ -415,6 +416,7 @@ class PMAR(object):
         #     # not needed anymore. seed_from_shapefile accepts point features
         #     # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
         #     self.seeding_shapefile = seeding_shapefile
+        
         if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
             seeding_poly = gpd.read_file(self.seeding_shapefile)
             seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
@@ -544,7 +546,7 @@ class PMAR(object):
         self.o.run(duration=duration, #end_time=end_time, 
                    time_step=time_step, #time_step_output=timedelta(hours=24), 
                    outfile=temp_outfile, 
-                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
+                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind', 'weight', 'length'])
 
         elapsed = (T.time() - t_0)
         logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
@@ -878,6 +880,10 @@ class PMAR(object):
                     Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
         return l, Nij, Pij    
 
+    def get_network(self, CM):
+        G = nx.from_numpy_array(CM, create_using=nx.MultiDiGraph, edge_attr='weight', parallel_edges=True) # important to specify DiGraph (directed graph)
+        self.network = G
+        return G
     
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
@@ -967,32 +973,15 @@ class PMAR(object):
         # establish study area
         if seeding_shapefile is not None and seed_within_bounds is not None:
              raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
-#         elif seeding_shapefile is None:
-#             if study_area is None:
-#                 if seed_within_bounds is None:
-#                     logger.warning('No study area provided. Taking the whole basin as spatial domain. This may take up a lot of memory.')
-# #                    seed_within_bounds = self.extent
-#                 study_area = seed_within_bounds
-#             elif study_area is not None:
-#                 if seed_within_bounds is None:
-#                     seed_within_bounds = study_area
-#         elif seeding_shapefile is not None:
-#             if study_area is None:
-#                 study_area = gpd.read_file(seeding_shapefile).total_bounds
+            
         if seed_within_bounds is None and seeding_shapefile is None:
             seed_within_bounds = self.context['extent']
         
         if seed_within_bounds is not None:
-#            seeding_shapefile = make_poly(seed_within_bounds)
-            #lon = seed_within_bounds[0::2]
-            #lat = seed_within_bounds[1::2]  
-            #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
             q = self.basedir / 'polygons' / poly_path
-            #make_poly(lon, lat, crs=crs, save_to=str(q))
             make_poly(seed_within_bounds, crs=crs, save_to=str(q))
             seeding_shapefile = str(q)
-#            logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
             logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
 
         if study_area is None:
