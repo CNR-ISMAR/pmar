@@ -47,7 +47,12 @@ from copy import deepcopy
 from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
-from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly, plot_map
+from cmap import Colormap
+tol_inc = Colormap('tol:incandescent').to_mpl()
+tol_muted = Colormap('tol:muted').to_mpl()
+rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
+tol_div = Colormap('tol:BuRd').to_mpl()
 #from xgcm import Grid
 
 logger = logging.getLogger('pmar')
@@ -848,7 +853,8 @@ class PMAR(object):
         return r
 
 
-    def CM(self, cm_grid=None, res=None, t0=0, t1=-1):
+    def get_CM(self, cm_grid=None, res=None, t0=0, t1=-1):
+        
         ds = self.ds.isel(time=[t0,t1]) 
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
@@ -856,7 +862,8 @@ class PMAR(object):
             else: # otherwise consider existing grid defined in .run()
                 grid = self.grid
             cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c)
-            
+        self.cm_grid = cm_grid
+        
         p_df = ds[['lon','lat']].to_dataframe().reset_index()
         p_gdf = gpd.GeoDataFrame(
                                 p_df,
@@ -882,12 +889,72 @@ class PMAR(object):
         self.CM = Pij
         return l, Nij, Pij    
 
-    def get_network(self, CM=None):
+    def plot_CM(self, tick_labels=None):
+        # use cm_grid for tick_labels
+        
+        if len(self.CM) <= 20:
+            annot = True
+            linewidths = 0.1
+        else:
+            annot = False
+            linewidths = 0
+            
+        fig, ax = plt.subplots(figsize=[12,10])
+        sns.heatmap(self.CM, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
+        ax.set_ylabel('FROM')
+        ax.set_xlabel('TO')
+
+        if tick_labels is not None:
+            ax.set_yticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=0);
+            ax.set_xticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=90);
+
+    def get_network(self, CM=None, node_names=None):
+        # use cm_grid['layer'].to_dict() for node_names
         if CM is None:
             CM = self.CM
-        G = nx.from_numpy_array(CM, create_using=nx.MultiDiGraph, edge_attr='weight', parallel_edges=True) # important to specify DiGraph (directed graph)
+        G = nx.from_numpy_array(CM, create_using=nx.MultiDiGraph, edge_attr='weight', parallel_edges=True) # important to specify DiGraph (directed graph) and parallel edges
+        if node_names is not None:
+            nx.set_node_attributes(G, values=node_names, name='node_name')
         self.network = G
         return G
+
+    def plot_network(self, G=None, cm_grid=None, show_cm_grid=False, show_map=False):
+
+        if cm_grid is None:
+            cm_grid = self.cm_grid
+        
+        if G is None:
+            G = self.network
+        
+        coordinates = np.column_stack((cm_grid.geometry.centroid.x, cm_grid.geometry.centroid.y))
+
+        positions = dict(zip(G.nodes, coordinates))
+
+        if show_map == True:
+            fig, ax = plot_map(figsize=[10,10])
+        else:
+            fig, ax = plt.subplots(figsize=[10,10])
+
+        if show_cm_grid == True:
+            cm_grid.boundary.plot(ax=ax, color='grey', linewidth=.5)
+            node_size = 0
+        else:
+            node_size = 5
+
+        if nx.get_node_attributes(G, 'node_name'):
+            labels = nx.get_node_attributes(G, 'node_name')
+        else:
+            labels = None
+            
+        nx.draw_networkx(G, positions, 
+                         ax=ax, node_size=node_size,#np.array(list(centrality.values()))*1e4, 
+                         #node_color=[float(G.out_degree(v)) for v in G], 
+                         alpha=0.9, 
+                         edge_cmap=tol_inc, font_size=8, 
+                         labels=labels,
+                         connectionstyle='arc3, rad = 0.1', edge_color=nx.get_edge_attributes(G, 'weight').values(), 
+                        width=np.array(list(nx.get_edge_attributes(G,'weight').values()))*50)   
+
     
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
