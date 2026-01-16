@@ -853,16 +853,26 @@ class PMAR(object):
         return r
 
 
-    def get_CM(self, cm_grid=None, res=None, t0=0, t1=-1):
+    def get_CM(self, cm_grid=None, res=None, t0=0, t1=-1, apply_landmask=False):
         
         ds = self.ds.isel(time=[t0,t1]) 
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
                 grid = self.xgrid(res=res, study_area=self.study_area)
+                self.grid = grid
             else: # otherwise consider existing grid defined in .run()
                 grid = self.grid
             cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c)
         self.cm_grid = cm_grid
+
+        if apply_landmask == True:
+            shpfilename = shpreader.natural_earth(resolution='10m',
+                        category='physical',
+                        name='ocean')
+            mask = gpd.read_file(shpfilename)
+            cm_grid = gpd.sjoin(cm_grid, mask, how='inner', predicate='intersects')
+
+        self.cm_grid = cm_grid 
         
         p_df = ds[['lon','lat']].to_dataframe().reset_index()
         p_gdf = gpd.GeoDataFrame(
@@ -903,11 +913,56 @@ class PMAR(object):
         sns.heatmap(self.CM, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
         ax.set_ylabel('FROM')
         ax.set_xlabel('TO')
+        ax.xaxis.tick_top()
+        ax.xaxis.set_label_position('top') 
 
         if tick_labels is not None:
             ax.set_yticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=0);
             ax.set_xticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=90);
 
+    def _predict_with_CM(self, initial_condition, CM=None):
+    # only works when CM is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
+        if CM is None:
+            CM = self.CM
+
+        _cm_prediction = np.matmul(initial_condition.ravel(), CM).reshape(initial_condition.shape)
+
+        cm_prediction = (xr.DataArray(_cm_prediction,
+                                      coords=dict(y_c=self.grid.y_c, x_c=self.grid.x_c, ))
+                         .rio.write_crs('epsg:4326'))
+        
+        self.cm_prediction = cm_prediction
+        
+        return cm_prediction
+        
+    def predict_with_CM(self, initial_condition, initial_condition_crs='epsg:4326', CM=None):
+    # only works when CM is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
+        if CM is None:
+            CM = self.CM
+
+        initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject('epsg:4326').sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
+        
+        if initial_condition.data.ravel().shape[0] != CM.shape[0]:
+            logger.warning('initial_condition and CM dimensions do not match. clipping initial_condition to match cm_grid.')
+            initial_condition = initial_condition.rio.clip(self.cm_grid.geometry, self.cm_grid.geometry.crs, drop=True, all_touched=True)
+            initial_condition = initial_condition.where(initial_condition>=0)
+        else:
+            logger.info('initial_condition and CM dimensions match.')
+        
+        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
+        
+        CM_xr = xr.DataArray(CM, 
+                             coords = dict(origin=initial_condition_stack.origin, destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x_c_end', 'y_c':'y_c_end'}).destination))
+        
+        cm_prediction = CM_xr.dot(initial_condition_stack).unstack().rio.set_spatial_dims(x_dim='x_c_end',y_dim='y_c_end')
+        
+        self.cm_prediction = cm_prediction
+        
+        return cm_prediction
+
+    
     def get_network(self, CM=None, node_names=None):
         # use cm_grid['layer'].to_dict() for node_names
         if CM is None:
@@ -918,7 +973,7 @@ class PMAR(object):
         self.network = G
         return G
 
-    def plot_network(self, G=None, cm_grid=None, show_cm_grid=False, show_map=False):
+    def plot_network(self, G=None, cm_grid=None, show_cm_grid=False, show_map=False, rescale_edge=1):
 
         if cm_grid is None:
             cm_grid = self.cm_grid
@@ -953,7 +1008,7 @@ class PMAR(object):
                          edge_cmap=tol_inc, font_size=8, 
                          labels=labels,
                          connectionstyle='arc3, rad = 0.1', edge_color=nx.get_edge_attributes(G, 'weight').values(), 
-                        width=np.array(list(nx.get_edge_attributes(G,'weight').values()))*50)   
+                        width=np.array(list(nx.get_edge_attributes(G,'weight').values()))*50*rescale_edge)   
 
     
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
