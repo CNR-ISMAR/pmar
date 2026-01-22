@@ -36,8 +36,6 @@ import rasterio
 import tempfile
 from netCDF4 import Dataset
 from pathlib import Path
-import hashlib
-import json
 #from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
@@ -49,6 +47,7 @@ import networkx as nx
 from pmar.cache import PMARCache
 from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly, plot_map
 from cmap import Colormap
+from scipy.sparse import coo_array
 tol_inc = Colormap('tol:incandescent').to_mpl()
 tol_muted = Colormap('tol:muted').to_mpl()
 rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
@@ -886,31 +885,47 @@ class PMAR(object):
                 poly = cm_grid.geometry.iloc[i]
                 l[t,:,i] = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].geometry.within(poly)
         
-        Nij = np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
-        Pij = Nij.copy() #np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        #Nij = np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        #Pij = Nij.copy() #np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        Nij = []
+        Pij = []
+        cm_row = []
+        cm_col = []
         
         for i in range(len(cm_grid)):
             for j in range(len(cm_grid)):
                 N = np.sum(l[0,:,i].astype(bool) & l[1,:,j].astype(bool)) # sums true in both arrays
-                Nij[i,j] = N
-                if l[0].sum(0)[i] > 0: # only divide if ni is >0 to avoid errors
-                    Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
-        
-        self.CM = Pij
-        return l, Nij, Pij    
+                #Nij[i,j] = N
+                #if l[0].sum(0)[i] > 0: # only divide if ni is >0 to avoid errors
+                 #   Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
+                if N > 0:
+                    Nij.append(N)
+                    cm_row.append(i)
+                    cm_col.append(j)
+                    if l[0].sum(0)[i] > 0:
+                        Pij.append(N / l[0].sum(0)[i])
 
-    def plot_CM(self, tick_labels=None):
+                
+        #self.CM = Pij
+        Nij_sparse = coo_array((Nij, (cm_row, cm_col)), shape=((len(cm_grid), len(cm_grid))))
+        Pij_sparse = coo_array((Pij, (cm_row, cm_col)), shape=((len(cm_grid), len(cm_grid))))
+        #return l, Nij, Pij    
+        self.CM = Pij_sparse
+        return l, Nij_sparse, Pij_sparse
+
+    def plot_CM(self, tick_labels=None, figsize=[8,6]):
         # use cm_grid for tick_labels
         
-        if len(self.CM) <= 20:
+        CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array 
+        if len(CM) <= 20:
             annot = True
             linewidths = 0.1
         else:
             annot = False
             linewidths = 0
             
-        fig, ax = plt.subplots(figsize=[12,10])
-        sns.heatmap(self.CM, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.heatmap(CM, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
         ax.set_ylabel('FROM')
         ax.set_xlabel('TO')
         ax.xaxis.tick_top()
@@ -940,7 +955,7 @@ class PMAR(object):
     # only works when CM is a grid covering the whole domain.
     # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
         if CM is None:
-            CM = self.CM
+            CM = self.CM.toarray() # my CM is now by default a sparse array, turn it into the full array to make predictions
 
         initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject('epsg:4326').sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
         
@@ -967,13 +982,13 @@ class PMAR(object):
         # use cm_grid['layer'].to_dict() for node_names
         if CM is None:
             CM = self.CM
-        G = nx.from_numpy_array(CM, create_using=nx.MultiDiGraph, edge_attr='weight', parallel_edges=True) # important to specify DiGraph (directed graph) and parallel edges
+        G = nx.from_scipy_sparse_array(CM, create_using=nx.MultiDiGraph, edge_attribute='weight', parallel_edges=True) # important to specify DiGraph (directed graph) and parallel edges
         if node_names is not None:
             nx.set_node_attributes(G, values=node_names, name='node_name')
         self.network = G
         return G
 
-    def plot_network(self, G=None, cm_grid=None, show_cm_grid=False, show_map=False, rescale_edge=1):
+    def plot_network(self, G=None, cm_grid=None, show_cm_grid=False, show_map=False, rescale_edge=1, figsize=[10,10], extent=None):
 
         if cm_grid is None:
             cm_grid = self.cm_grid
@@ -986,9 +1001,9 @@ class PMAR(object):
         positions = dict(zip(G.nodes, coordinates))
 
         if show_map == True:
-            fig, ax = plot_map(figsize=[10,10])
+            fig, ax = plot_map(figsize=figsize, extent=extent)
         else:
-            fig, ax = plt.subplots(figsize=[10,10])
+            fig, ax = plt.subplots(figsize=figsize)
 
         if show_cm_grid == True:
             cm_grid.boundary.plot(ax=ax, color='grey', linewidth=.5)
