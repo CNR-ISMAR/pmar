@@ -862,7 +862,7 @@ class PMAR(object):
             else: # otherwise consider existing grid defined in .run()
                 grid = self.grid
             cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c)
-        self.cm_grid = cm_grid
+        #self.cm_grid = cm_grid
 
         if apply_landmask == True:
             shpfilename = shpreader.natural_earth(resolution='10m',
@@ -871,7 +871,7 @@ class PMAR(object):
             mask = gpd.read_file(shpfilename)
             cm_grid = gpd.sjoin(cm_grid, mask, how='inner', predicate='intersects')
 
-        self.cm_grid = cm_grid 
+        #self.cm_grid = cm_grid 
         
         p_df = ds[['lon','lat']].to_dataframe().reset_index()
         p_gdf = gpd.GeoDataFrame(
@@ -879,6 +879,7 @@ class PMAR(object):
                                 geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
                                 crs=cm_grid.crs
                                 )
+        
         l = np.zeros((len(ds.time), len(ds.trajectory), len(cm_grid)))
         for t in range(2):
             for i, polys in enumerate(cm_grid.geometry):
@@ -909,7 +910,9 @@ class PMAR(object):
         #self.CM = Pij
         Nij_sparse = coo_array((Nij, (cm_row, cm_col)), shape=((len(cm_grid), len(cm_grid))))
         Pij_sparse = coo_array((Pij, (cm_row, cm_col)), shape=((len(cm_grid), len(cm_grid))))
-        #return l, Nij, Pij    
+        #return l, Nij, Pij   
+        
+        self.cm_grid = cm_grid 
         self.CM = Pij_sparse
         return l, Nij_sparse, Pij_sparse
 
@@ -925,7 +928,7 @@ class PMAR(object):
             linewidths = 0
             
         fig, ax = plt.subplots(figsize=figsize)
-        sns.heatmap(CM, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
+        sns.heatmap(CM*100, annot=annot, linewidths=linewidths, square=True, cmap=tol_inc, ax=ax)
         ax.set_ylabel('FROM')
         ax.set_xlabel('TO')
         ax.xaxis.tick_top()
@@ -934,6 +937,8 @@ class PMAR(object):
         if tick_labels is not None:
             ax.set_yticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=0);
             ax.set_xticks(ticks=np.arange(0.5,len(tick_labels)), labels=tick_labels, rotation=90);
+
+        return fig, ax 
 
     def _predict_with_CM(self, initial_condition, CM=None):
     # only works when CM is a grid covering the whole domain.
@@ -1025,6 +1030,7 @@ class PMAR(object):
                          connectionstyle='arc3, rad = 0.1', edge_color=nx.get_edge_attributes(G, 'weight').values(), 
                         width=np.array(list(nx.get_edge_attributes(G,'weight').values()))*50*rescale_edge)   
 
+        return fig, ax 
     
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
