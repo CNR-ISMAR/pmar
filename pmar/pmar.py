@@ -10,44 +10,46 @@ from opendrift.models.oceandrift import OceanDrift
 from opendrift.models.openoil import OpenOil
 from opendrift.models.plastdrift import PlastDrift
 from opendrift.models.chemicaldrift import ChemicalDrift
+from opendrift.models.larvalfish import LarvalFish
 #import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
+from opendrift.readers.unstructured import shyfem
 from opendrift.readers.reader_netCDF_CF_generic import Reader as GenericReader
 import opendrift
-from pydap.client import open_url
-from pydap.cas.get_cookies import setup_session
+#from pydap.client import open_url
+#from pydap.cas.get_cookies import setup_session
 import time as T
 from xhistogram.xarray import histogram
-import seaborn as sns
-spectral_r = sns.color_palette("Spectral_r", as_cmap=True)
-import cartopy.crs as ccrs
-import cartopy
-from matplotlib.ticker import LogFormatter, PercentFormatter
-from matplotlib import ticker
-import matplotlib.pyplot as plt
-import matplotlib.colors as col
 import os
 from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
 #import netrc
-import random
-import rasterio
-import tempfile
-from netCDF4 import Dataset
+#import random
+#import rasterio
+#import tempfile
+#from netCDF4 import Dataset
 from pathlib import Path
-import hashlib
-import json
 #from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
 from rasterio.enums import Resampling
-import glob
-from copy import deepcopy
-from geocube.api.core import make_geocube
-from pmar.pmar_cache import PMARCache
-from pmar.pmar_utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, _make_poly
+#import glob
+#from copy import deepcopy
+#from geocube.api.core import make_geocube
+import networkx as nx
+from pmar.cache import PMARCache
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid
+#from cmap import Colormap
+#from pmar.plotting import plot_map
+from scipy.sparse import coo_array
+#tol_inc = Colormap('tol:incandescent').to_mpl()
+#tol_muted = Colormap('tol:muted').to_mpl()
+#rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
+#tol_div = Colormap('tol:BuRd').to_mpl()
 #from xgcm import Grid
-
+from scipy.sparse import diags
+from scipy.sparse.linalg import matrix_power
+from scipy.io import mmwrite
 logger = logging.getLogger('pmar')
 #logger.setLevel(logging.DEBUG)
 # sh = logging.StreamHandler()
@@ -77,7 +79,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context='global', readers=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
+    def __init__(self, context='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
@@ -102,7 +104,6 @@ class PMAR(object):
             self.particle_path = [] # i can import an existing particle_path
         else:
             self.particle_path = particle_path
-        #self.ds = None. commented otherwise try: self.ds except: does not work
         self.o = None
         self.seeding_id = 0 # gives error in opendrift if set to None
         #self.netrc_path = netrc_path
@@ -115,7 +116,7 @@ class PMAR(object):
         self.chemical_compound = chemical_compound
         self.localdatadir = localdatadir
         self.particle_status = None
-        self.seedings = 1
+        self.seedings = None
         self.tshift = None
         self.cache = PMARCache(Path(basedir) / 'cachedir')
         self.raster_path = None
@@ -123,13 +124,15 @@ class PMAR(object):
         self.res = None
         self.weight = None
         self.study_area = None
-        self.res = None
         self.ds = None
-        self.ppi_path = []
+        self.ppi_list = []
         self.seeding_shapefile = None # can be point, line or polygon
         self.seed_within_bounds = None # if no seeding_shapefile is given, user can choose to give lon, lat bounds to seed within
         self.loglevel = loglevel
         self.readers = readers
+        self.reader_type = reader_type
+        self.particle_list = []
+        self.output = None
         
         # set up logger 
         logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
@@ -162,9 +165,9 @@ class PMAR(object):
         # this (if still needed?) should be a separate method
         # if particle_path is given, retrieve number of seedings and load ds
             # gather number of seedings from origin marker. THIS IS A PROBLEM IF THERE ARE MORE BATCHES IN SAME FOLDER. 
-        if type(self.particle_path) is list: 
-                if self.particle_path:
-                    self.seedings = len(particle_path)
+        # if type(self.particle_path) is list: 
+        #         if self.particle_path:
+        #             self.seedings = len(particle_path)
                 
 
 
@@ -174,7 +177,8 @@ class PMAR(object):
                   #   'bacteria': {'opendrift_module': OceanDrift, 'termvel':0, 'decay_coef':1},
                      'chemical': {'opendrift_module': ChemicalDrift},
                      'oil': {'opendrift_module': OpenOil},
-                     'metal': {'opendrift_module': ChemicalDrift}}        
+                     'metal': {'opendrift_module': ChemicalDrift},
+                    'larvae': {'opendrift_module': LarvalFish}}        
 
         self.pressure = pressure
         self.opendrift_module = pressures[pressure]['opendrift_module']
@@ -203,10 +207,10 @@ class PMAR(object):
                         
                         'med': 
                         {'readers':
-                         {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change d to h to get hourly. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                         {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                           'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
                           'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
-                          'mixed-layer': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # Mediterranean Sea Physics Reanalysis
+                          'mixed-layer': 'cmems_mod_med_phy-mld_my_4.2km_P1D-m', # Mediterranean Sea Physics Reanalysis
                           'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
                          },
                          'extent': [-6, 30.19, 36.29, 45.98],
@@ -245,8 +249,12 @@ class PMAR(object):
         
         return contexts[context]
 
-
-    def xgrid(self, res, study_area=None, crs='epsg:4326'):
+    
+    def _make_grid(self, res, study_area=None, crs='epsg:4326'):
+        
+        if study_area is None:
+            study_area = self.study_area
+            
         xmin, ymin, xmax, ymax = study_area
         cols = np.arange(xmin, xmax + res, res)            
         rows = np.arange(ymin, ymax + res, res)
@@ -259,60 +267,53 @@ class PMAR(object):
         x_c = (x_e + res/2)[:-1]
         y_c = (y_e + res/2)[:-1]     
 
-        xgrid = xr.Dataset(coords={'x_e':x_e, 'y_e':y_e, 'x_c':x_c, 'y_c':y_c})
+        grid = xr.Dataset(coords={'x_e':x_e, 'y_e':y_e, 'x_c':x_c, 'y_c':y_c})
 
-        xgrid['dx'] = xgrid['dy'] = res
+        grid['dx'] = grid['dy'] = res
 
-        Xc, Yc = np.meshgrid(xgrid.x_c, xgrid.y_c)
-        xgrid = xgrid.assign({'Xc': (('y_c', 'x_c'), Xc), 'Yc': (('y_c', 'x_c'), Yc)}) #dataarrays 
+        Xc, Yc = np.meshgrid(grid.x_c, grid.y_c)
+        grid = grid.assign({'Xc': (('y_c', 'x_c'), Xc), 'Yc': (('y_c', 'x_c'), Yc), 'ones': (('y_c','x_c'), np.ones((len(grid.y_c), len(grid.x_c))))}) #dataarrays 
 
-        xgrid = xgrid.assign({'bin_n': (('y_c','x_c'), np.arange(0,Xc.size).reshape((len(y_c), len(x_c)))
+        grid = grid.assign({'bin_n': (('y_c','x_c'), np.arange(0,Xc.size).reshape((len(y_c), len(x_c)))
 )})
         
-        xgrid.rio.write_crs(crs, inplace=True)
-        
-        # grid = Grid(xgrid, 
-        #             coords={"X": {"center": "x_c", "outer": "x_e"}, 
-        #                    'Y': {"center": "y_c", "outer": "y_e"}}, 
-        #             metrics = {
-        #     ('X',): ['dx'], # X distances
-        #     ('Y',): ['dy']},
-        #            periodic=False)
+        grid.rio.write_crs(crs, inplace=True)
 
-        return xgrid
+        return grid
 
-    @property
-    def get_ds(self):
-        # this doesnt actually work with seedings, because self.ds always exists, but then it is only the last rep.
-        # should discriminate e.g. by comparing self.ptot with self.ds.trajectory.
-        # if they don't match, i am probably only looking at the last rep. 
-        #try:
-         #   self.ds
-            #logger.info('get_ds: returning previously calculated ds.')
-        #except:
+    
+    def import_trajectories(self, files_to_import): #, align_by = 'time'):
+        if type(files_to_import) is str:
+            self.particle_path = files_to_import
+            ds = xr.open_dataset(self.particle_path)
+            print('string')
+            
+        elif type(files_to_import) is list:
+            self.particle_list = files_to_import
+            self.seedings = len(self.particle_list)
+            
+            ds = xr.open_mfdataset(self.particle_list, parallel=True, combine='nested', join='outer', concat_dim='seeding') # this will give all seedings the same dimensions and pad them with nans
+            print('list')
+            
+        elif type(files_to_import) is xr.core.dataset.Dataset:
+            ds = files_to_import 
+            print('ds')
         
-        #if not self.ds:
-        if self.particle_path:
-            logger.info('get_ds: retrieving ds from particle_path.')
-            
-            if type(self.particle_path) is str or len(self.particle_path) == 1:
-            #    ds = xr.open_dataset(self.particle_path, chunks={'trajectory': 10000, 'time':1000})
-            
-                partial_func = None
-            else:
-                partial_func = partial(self._preprocess, correct_len = self.find_correct_len())
-                
-            ds = xr.open_mfdataset(self.particle_path, preprocess=partial_func, concat_dim='trajectory', combine='nested', parallel=True, chunks={'trajectory': 10000, 'time':1000}) # add join='ovverride' to have them realigned
-            logger.debug(f'lat = {ds.lat.shape}, lon={ds.lon.shape}, time={ds.time.shape}')
-            # if the run contained multiple seedings, ensure trajectories have unique IDs for convenience
-            logger.debug(f'self.seedings = {self.seedings}')
-            ds['trajectory'] = np.arange(0, len(ds.trajectory)) 
-                       
-            self.ds = ds
+        elif type(files_to_import) is list:
+            raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
         else:
-            logger.error('particle_path is None. Unable to retrieve ds.')
-        
-        return self.ds
+            raise ValueError('Type of files_to_import unrecognised. please provide path(s) to file(s) or xarray Dataset.')
+    
+        self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
+        # giving all traj unique id?
+        pass
+
+    def import_ppi(self, files_to_import):
+        r = xr.open_mfdataset(files_to_import, engine="rasterio", concat_dim='seeding', combine='nested').squeeze().band_data
+
+        self.ppi_list = files_to_import
+        return r
+    
 
     # Given multiple particle_paths, it returns the maximum time length. 
     # Used for preprocessing function in get_ds to make sure all ds's have same time length, even if opendrift ended early because of all particles beaching.
@@ -320,7 +321,7 @@ class PMAR(object):
         '''
         Sometimes opendrift runs end early because e.g. all particles have beached, resulting in seedings with different time lengths. This method finds the maximum time lenght of all seedings.
         '''
-        lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_path])
+        lens = np.array([len(xr.open_dataset(filename).time) for filename in self.particle_list])
         logger.info(f'giving all datasets the same time length of {lens} tsteps...')
         return lens.max()
 
@@ -331,7 +332,7 @@ class PMAR(object):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
     
-    def get_trajectories(self, pnum, start_time, season=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False):
+    def get_trajectories(self, pnum, start_time, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -350,8 +351,6 @@ class PMAR(object):
             The number of particles to be seeded
         start_time : str
             The start date of the simulation, in string format 'dd-mm-yyyy'
-        season : str, optional
-            Season in which simulation should be run. Defines start_time automatically. Default is None
         duration_days : int, optional
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
         seeding_shapefile : str, optional
@@ -379,213 +378,269 @@ class PMAR(object):
             Provide a higher value (e.g. 20) to receive less output.
         """
         
-        t_0 = T.time()   
+        t_0 = T.time()  
+        
+        # needed for cache
+        self.seeding_radius = seeding_radius
+        self.pnum = pnum
+        self.start_time = start_time
+        self.duration = duration_days
+
+        #### SPATIAL DOMAIN
+        # establish study area
+        if seeding_shapefile is not None and seed_within_bounds is not None:
+             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
+            
+        if seed_within_bounds is None and seeding_shapefile is None:
+            seed_within_bounds = self.context['extent']
+        
+        if seed_within_bounds is not None:
+            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
+            q = self.basedir / 'polygons' / poly_path
+            make_poly(seed_within_bounds, crs=crs, save_to=str(q))
+            # COULD REPLACE THIS WITH VECTOR GRID
+            seeding_shapefile = str(q)
+            logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
+
+        if study_area is None:
+            study_area = self.context['extent']
+
+        self.study_area = study_area
+        self.seeding_shapefile = seeding_shapefile 
+        self.seed_within_bounds = seed_within_bounds
+        logger.debug(f'study_area = {self.study_area}, seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
+
+        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
+
+        logger.info(f'particle_path exists = {file_exists}, {file_path}')
+        logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
+
+        self.particle_path = file_path
+        #self.particle_list.append(file_path)
+        
+        if file_exists == True:
+            logger.info(f'Opendrift file with these configurations already exists within {self.basedir}. Importing.') 
+            #logger.info(f'self.ds has shape {self.ds.dims}')
+        
+        else:
          
-        # if termvel is None:
-        #     termvel = self.termvel
-        
-        ### time settings ####
-        ssns = {'summer': datetime(2019,6,1),
-               'winter': datetime(2019,12,1),
-               'spring': datetime(2019,3,1),
-               'autumn': datetime(2019,9,1)}
+            # if termvel is None:
+            #     termvel = self.termvel
+            
+            ### time settings ####
 
-        if season in ssns.keys():
-            start_time = ssns[season]  
-        else:
             start_time = datetime.strptime(start_time, '%Y-%m-%d')
-        end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
-        time_step = tstep
+            end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
+            time_step = tstep
+    
+            duration = timedelta(days=duration_days)
 
-        duration = timedelta(days=duration_days)
-        
-        self.tstep = tstep
-
-        # if seed_within_bounds is not None:
-        #     lon = seed_within_bounds[0::2]
-        #     lat = seed_within_bounds[1::2]  
-        #     poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-        #     q = self.basedir / 'polygons' / poly_path
-        #     make_poly(lon, lat, crs=crs, save_to=str(q))
-        #     self.seeding_shapefile = str(q)
-        #     logger.info(f'seeding within bounds {lon},{lat}')
-        # else: 
-        #     # not needed anymore. seed_from_shapefile accepts point features
-        #     # if the seeding shapefile contains points, add a small buffer to turn them into polygons, to use opendrift.seed_from_shapefile
-        #     self.seeding_shapefile = seeding_shapefile
-        if np.unique(gpd.read_file(self.seeding_shapefile).geometry.type) == 'Point':
-            seeding_poly = gpd.read_file(self.seeding_shapefile)
-            seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
-            new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
-            seeding_poly.to_file(new_seeding_shapefile)
-            self.seeding_shapefile = str(new_seeding_shapefile)
-            logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
-
-            logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
-            #self.seeding_shapefile = seeding_shapefile
-        
-        # path to write particle simulation file. also used for our 'cache'    
-        t0 = start_time.strftime('%Y-%m-%d')
-        t1 = end_time.strftime('%Y-%m-%d')
-        
+            self.tstep = tstep
+    
             
-        # initialise OpenDrift object
-        self.o = self.opendrift_module(loglevel=40)
+            if 'Point' in list(gpd.read_file(self.seeding_shapefile).geometry.type):
+                seeding_poly = gpd.read_file(self.seeding_shapefile)
+                seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
+                new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
+                seeding_poly.to_file(new_seeding_shapefile)
+                self.seeding_shapefile = str(new_seeding_shapefile)
+                logger.debug(f'Added buffer to {np.unique(seeding_poly.geometry.type)} type geometry in self.seeding_shapefile to allow seed_from_shapefile')
+    
+                logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
+                #self.seeding_shapefile = seeding_shapefile
             
+            # path to write particle simulation file. also used for our 'cache'    
+            t0 = start_time.strftime('%Y-%m-%d')
+            t1 = end_time.strftime('%Y-%m-%d')
+            
+                
+            # initialise OpenDrift object
+            self.o = self.opendrift_module(loglevel=40)
+                
+            
+            # some OpenDrift configurations
+            if beaching:
+                self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
+            else:
+                self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
+            
+            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
+            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            
+            # ChemicalDrift configs - ## DO NOT CHANGE ORDER OF CONFIGS ## 
+            if self.pressure in ['chemical', 'metal']:
+                self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
+                self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
+                self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
+                #self.o.set_config('vertical_mixing:timestep', 60) is default
+                #o.set_config('drift:horizontal_diffusivity', 10)
+    
+                # leaving default values
+                #self.o.set_config('chemical:particle_diameter',25.e-6)  # m
+                #self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
+                
+                # Parameters from radionuclides (Magne Simonsen 2019)
+                #self.o.set_config('chemical:sediment:resuspension_depth',1.) is default
+                self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1) # there are default values for these 
+                self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
+                self.o.set_config('chemical:sediment:desorption_depth',1.)
+                self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
+                
+                #if self.pressure == 'metal':
+                  #  self.o.set_config('chemical:transformations:volatilization', False) default is False
+                    #self.o.set_config('chemical:transformations:degradation', False)  default is False
+                if self.pressure == 'chemical':
+                    self.o.set_config('chemical:transformations:volatilization', True) 
+                    self.o.set_config('chemical:transformations:degradation', True) 
+                    self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
+                
+                self.o.init_chemical_compound(self.chemical_compound) # includes a selection of PAHs and metals
+                logger.info(f'initialising chemical compound {self.chemical_compound}')
+    
+                # by default, all is dissolved at seeding. maybe parametrise in future
+                LMM_fraction = 1
+                self.o.set_config('seed:LMM_fraction',LMM_fraction)
+                self.o.set_config('seed:particle_fraction',1-LMM_fraction)
+    
+                # these have to be here in this order otherwise it gives error
+                self.o.init_species() 
+                self.o.init_transfer_rates()
+                                
+    
+            logger.info('adding landmask...')
+            # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
+            shpfilename = shpreader.natural_earth(resolution='10m',
+                                    category='cultural',
+                                    name='admin_0_countries')
+            reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
+            
+            self.o.add_reader([reader_landmask])
+            self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
+            
+            logger.info('adding readers...')            
+            
+            if self.readers:
+                # add local datasets as readers. added for sl application
+                for id,r in enumerate(self.readers):
+                    # if self.reader_type == 'shyfem':
+                    #     reader = shyfem.Reader(r)
+                    # else:
+                    #     reader = GenericReader(r, name=f'cmems_{id}')
+                    self.o.add_reader(r)#, variables=['x_sea_water_velocity', 'y_sea_water_velocity'])
+    
+            else:
+            #if self.context:
+                readers = []
+                # add predefined readers from context
+                for var in self.context['readers']:
+                    readers.append(Reader(dataset_id=self.context['readers'][var]))
+                self.o.add_reader(readers) # add all readers for that context.
+                #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
         
-        # some OpenDrift configurations
-        if beaching:
-            self.o.set_config('general:coastline_action', 'stranding') # behaviour at coastline. 'stranding' means beaching of particles is allowed
-        else:
-            self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
-        
-        self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
-        self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
-        
-        # ChemicalDrift configs - ## DO NOT CHANGE ORDER OF CONFIGS ## 
-        if self.pressure in ['chemical', 'metal']:
-            self.o.set_config('drift:vertical_mixing', True) # OpenDrift default is False, should be True for ChemicalDrift
+    
+            ##### SEEDING #####
+            logger.info('seeding particles...')
+            np.random.seed(None)            
+    
+            Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
+            
+            # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
+            #logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
+    
+            self.termvel = termvel
             self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-            self.o.set_config('vertical_mixing:background_diffusivity',0.0001)
-            #self.o.set_config('vertical_mixing:timestep', 60) is default
-            #o.set_config('drift:horizontal_diffusivity', 10)
-
-            # leaving default values
-            #self.o.set_config('chemical:particle_diameter',25.e-6)  # m
-            #self.o.set_config('chemical:particle_diameter_uncertainty',1.e-7) # m
+            #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
+            self.o.set_config('drift:vertical_mixing', True)  
+    
+            # TODO 
+            if pnum_per_shape is True:
+                seeding_polygon = gpd.read_file(self.seeding_shapefile)
+                for shape in range(len(seeding_polygon)):
+                    self.o.seed_from_geopandas(geodataframe=seeding_polygon.iloc[[shape]], number=pnum, time=start_time, 
+                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id)
+            else:
+                self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
+                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
+    
+    
+            logger.info('running opendrift...')
+            now = datetime.now()
+            current_time = now.strftime("%H:%M:%S")
+    
+            # check outfile
+            if type(self.particle_path) is list:
+                if len(self.particle_path)>1:
+                    raise ValueError('opendrift outfile must be string')
             
-            # Parameters from radionuclides (Magne Simonsen 2019)
-            #self.o.set_config('chemical:sediment:resuspension_depth',1.) is default
-            self.o.set_config('chemical:sediment:resuspension_depth_uncert',0.1) # there are default values for these 
-            self.o.set_config('chemical:sediment:resuspension_critvel',0.15)
-            self.o.set_config('chemical:sediment:desorption_depth',1.)
-            self.o.set_config('chemical:sediment:desorption_depth_uncert',0.1)
+            self.o.run(duration=duration, #end_time=end_time, 
+                       time_step=time_step, #time_step_output=timedelta(hours=24), 
+                       outfile=str(self.particle_path), #temp_outfile, 
+                       export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'weight', 'length']) # 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind',
+    
+            elapsed = (T.time() - t_0)
+            logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
+    
+            if hasattr(self.o, 'discarded_readers'):
+                logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
+    
+            #ds = self.o.result
+            #ds['lon'] = ds['lon'].where(ds.status>=0).ffill('time')
+            #ds['lat'] = ds['lat'].where(ds.status>=0).ffill('time')
+            #if 'z' in ds.data_vars:
+             #   ds['z'] = ds['z'].where(ds.status>=0).ffill('time')
             
-            #if self.pressure == 'metal':
-              #  self.o.set_config('chemical:transformations:volatilization', False) default is False
-                #self.o.set_config('chemical:transformations:degradation', False)  default is False
-            if self.pressure == 'chemical':
-                self.o.set_config('chemical:transformations:volatilization', True) 
-                self.o.set_config('chemical:transformations:degradation', True) 
-                self.o.set_config('chemical:transformations:degradation_mode', 'OverallRateConstants')
-            
-            self.o.init_chemical_compound(self.chemical_compound) # includes a selection of PAHs and metals
-            logger.info(f'initialising chemical compound {self.chemical_compound}')
+            #self.ds = ds 
+        self.import_trajectories(str(file_path))
 
-            # by default, all is dissolved at seeding. maybe parametrise in future
-            LMM_fraction = 1
-            self.o.set_config('seed:LMM_fraction',LMM_fraction)
-            self.o.set_config('seed:particle_fraction',1-LMM_fraction)
-
-            # these have to be here in this order otherwise it gives error
-            self.o.init_species() 
-            self.o.init_transfer_rates()
-                            
-
-        logger.info('adding landmask...')
-        # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
-        shpfilename = shpreader.natural_earth(resolution='10m',
-                                category='cultural',
-                                name='admin_0_countries')
-        reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
-        
-        self.o.add_reader([reader_landmask])
-        self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
-        
-        logger.info('adding readers...')            
-        
-        if self.readers:
-            # add local datasets as readers. added for sl application
-            for id,r in enumerate(self.readers):
-                reader = GenericReader(r, name=f'cmems_{id}')
-                self.o.add_reader(reader)#, variables=['x_sea_water_velocity', 'y_sea_water_velocity'])
-
-        else:
-        #if self.context:
-            readers = []
-            # add predefined readers from context
-            for var in self.context['readers']:
-                readers.append(Reader(dataset_id=self.context['readers'][var]))
-            self.o.add_reader(readers) # add all readers for that context.
-            #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
-        
-        # uncertainty
-        #self.o.set_config('drift:current_uncertainty', .1)
-        #self.o.set_config('drift:wind_uncertainty', 1)
-
-        ##### SEEDING #####
-        logger.info('seeding particles...')
-        np.random.seed(None)            
-
-        Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-        
-        # if simulation is 3D, set 3D parameters (terminal velocity, vertical mixing, seafloor action) and seed particles over polygon
-        #logger.debug(f'self.seeding_shapefile = {self.seeding_shapefile}')
-
-        self.termvel = termvel
-        self.o.set_config('vertical_mixing:diffusivitymodel', 'windspeed_Large1994')
-        #self.o.set_config('general:seafloor_action', 'deactivate') # not applicable in chemical drift
-        self.o.set_config('drift:vertical_mixing', True)        
-        self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
-                                   terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
-
-        
-        # run simulation and write to temporary file
-        #with tempfile.TemporaryDirectory("particle", dir=self.basedir) as qtemp:
-        qtemp = tempfile.TemporaryDirectory("particle", dir=self.basedir)
-        temp_outfile = qtemp.name + f'/temp_particle_file_marker-{self.seeding_id}.nc' # probably not needed anymore
-
-        logger.info('running opendrift...')
-        now = datetime.now()
-        current_time = now.strftime("%H:%M:%S")
-
-        self.o.run(duration=duration, #end_time=end_time, 
-                   time_step=time_step, #time_step_output=timedelta(hours=24), 
-                   outfile=temp_outfile, 
-                   export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind'])
-
-        elapsed = (T.time() - t_0)
-        logger.info("total simulation runtime %s" % timedelta(minutes=elapsed/60)) 
-
-        if hasattr(self.o, 'discarded_readers'):
-            logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
-
-        #### A BIT OF POST-PROCESSING ####
-        logger.info('writing to netcdf...')
-
-        _ps = xr.open_dataset(temp_outfile) # open temporary file
-        #_ps = self.o.result # writing this to netcdf gives strange error TypeError: Invalid value for attr 'dtype': <class 'numpy.int32'>.
-        #print('time len before processing', len(_ps.time))
-
-        # keep 'inactive' particles visible (i.e. particles that have beached or gotten stuck on seafloor)
-        ps = _ps.where(_ps.status>=0).ffill('time') 
-        #print('time len after ffill inactive', len(ps.time))
-
-        # write useful attributes
-        ps = ps.assign_attrs({#'extent': self.extent, 
-                              'start_time': t0, 'duration_days': duration_days, 'pnum': pnum, 'hdiff': hdiff,
-                              #'tseed': self.tseed.total_seconds(), 
-                              'tstep': tstep.total_seconds(), 'termvel': termvel, 'seeding_shapefile': self.seeding_shapefile,
-                              #'poly_path': self.poly_path, 
-                              'opendrift_log': str(self.o)}) 
-
-
-        #ps.to_netcdf(str(file_path))
-        #logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.")
-
-        
-        self.ds = ps
-        
-        if 'qtemp' in locals():
-            Path(temp_outfile).unlink()
-            os.rmdir(qtemp.name)
-
-        
-        logger.info(f'particle simulation lat = {ps.lat.shape}, lon={ps.lon.shape}, time={ps.time.shape}')
-
+        logger.info(f'particle simulation lat = {self.ds.lat.shape}, lon={self.ds.lon.shape}, time={self.ds.time.shape}')
+        logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
         
         pass
+
+    def plot_trajectories(self, t=None, filename=None, s=None, c='age', cmap='viridis', alpha=None, proj=None):
+        from pmar.plotting import plot_map
+        import matplotlib.pyplot as plt
+        import cartopy
+        if proj is None:
+            proj = cartopy.crs.PlateCarree()
+            
+        ds = self.ds
+        O = np.floor(np.log10(len(ds.time)))
+
+        # subset of time
+        if t is None:
+            if O >= 3:
+                ds = ds.isel(time=slice(None,None,int(len(ds.time)/10**(O-2))))
+            else:
+                ds = ds
+        else:
+            ds = ds.isel(time=t)
+    
+        # subset of trajectories
+        O = np.floor(np.log10(len(ds.trajectory)))
+        if O > 3:
+            ds = ds.isel(trajectory=slice(None,None,int(len(ds.trajectory)/10**(O-1))))
+        else:
+            ds = ds
+      
         
+        if c == 'age': 
+            c = ds.age_seconds/60/60/24
+            cmap = 'rainbow' #'copper'
+            cbar_label = 'elapsed days'
+        elif c == 'z':
+            c = ds.z
+            cmap = 'viridis'
+            cbar_label = 'depth [m]'
+        elif c == 'marker':
+            c = ds.origin_marker
+            cbar_label = 'origin marker (#rep)'
+
+        fig, ax = plot_map(filename=filename, proj=proj)
+        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha, transform=cartopy.crs.PlateCarree())
+        cax = fig.add_axes([ax.get_position().x1+0.05,ax.get_position().y0,0.02,ax.get_position().height])
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.set_label(cbar_label, rotation=90)
         
     def filter_by_status(self, status):
         """
@@ -593,10 +648,10 @@ class PMAR(object):
         """
         available_status = {'active': 0, 'stranded': 1, 'seafloor': 2}
 
-        try:
-            ds = self.ds
-        except:
-            ds = self.get_ds
+#        try:
+        ds = self.ds
+#        except:
+#            ds = self.get_ds
 
         try:
             traj = ds.trajectory.where(ds.isel(time=-1).status==available_status[status]).dropna('trajectory').data
@@ -610,10 +665,10 @@ class PMAR(object):
         """
         Interpolate time on ds by giving a new timestep (in hours).
         """
-        try:
-            ds = self.ds
-        except:
-            ds = self.get_ds
+        #try:
+        ds = self.ds
+        #except:
+        #    ds = self.get_ds
             
         new_time = np.arange(pd.to_datetime(ds.time[0].values), pd.to_datetime(ds.time[-1].values),timedelta(hours=new_timestep)) #new time variables used for interpolation
         ds = ds.interp(time=new_time, method='slinear') # interpolate dataset 
@@ -659,88 +714,85 @@ class PMAR(object):
         
         return use_value 
 
-    # to deprecate
-    def _assign_weight(self, weight=1):
-        """
-        Add a weight variable to ds. 
-        """
-        # TODO. produce weight variable from floats, arrays, shapefiles, rasters
-        
-        ds = self.get_ds
-
-        logger.info(f'Adding weight variable to ds...')
-        w = np.ones_like(self.ds.lon)*weight # longitude is always going to be available as a variable, so taking it as reference for the shape
-        ds = ds.assign({'weight': (('trajectory', 'time'), w.data)}) 
-        logger.info('updating weight variable in ds')
-        
-        return ds
 
     def normalize_weight(self, weight, res, study_area=None):
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
+        
         bin_n_t0 = self.get_bin_n(res=res, t=0, study_area=study_area)
         self.ds['bin_n_t0'] = bin_n_t0
+
         weight_by_bin = weight.groupby(self.ds.bin_n_t0.load()) # added load otherwise groupby raises error
-        counts_per_bin = self.ds.bin_n_t0.groupby(self.ds.bin_n_t0).count()
-
-        # bin_n = self.get_bin_n(res=res, study_area=study_area)        
-        # self.ds['bin_n'] = bin_n
-        # logger.info('weight_by_bin...')
-        # weight_by_bin = weight.groupby(self.ds.isel(time=0).bin_n.load()) # added load otherwise groupby raises error
-
-        #logger.info('done.') 
-        #counts_per_bin = self.ds.isel(time=0).bin_n.groupby(self.ds.isel(time=0).bin_n).count()
+        counts_per_bin = bin_n_t0.groupby(self.ds.bin_n_t0).count()
         
         logger.info('counts_per_bin...')
         normalized_weight = weight_by_bin/counts_per_bin 
-        #logger.info('done.')
+
         return normalized_weight
 
-    def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=False):
+    def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=True):
         '''
         Associate weights with each trajectory. 
         ORDER OF OPERATIONS MATTERS.
         Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).  
         '''
-
-        if type(weight) is int:
-            weight = xr.DataArray(weight)
         
+            
+        if study_area is None:
+            study_area = self.study_area
+        
+        if res is not None or study_area is not None:
+            # if a new res or study area is required, recalculate grid
+            self.grid = make_grid(res=res, study_area=study_area)
+        if use is None:
+            logger.info('no use provided. calculating ppi from unity use.')            
+
+        # could merge use and weight and just say it can be int or array
+        if type(weight) is int:
+            weight = xr.ones_like(self.ds.lon)*weight
+            logger.warning(weight.shape)
+
         if use is not None:
-            # extract value of use at starting position of each trajectory
-            use_value = self.use_by_traj(use=use, res=res, study_area=study_area)
+            use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}))#, tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
+            self.use = use
+            use_value = self.use_by_traj(use=self.use, res=res, study_area=study_area).broadcast_like(self.ds.lon)
             weight = weight*use_value#/len(self.ds.time) # dividing use weight by the number of timesteps for conservation
             # (trajectory)
         #else:
          #   weight=xr.ones_like(self.ds.lon) # needed to give weights the correct shape in all possible cases
+            logger.warning(weight.shape)
 
         if emission is not None:
             self.emission = emission * self.ds.tstep / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
             logger.info(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             weight = weight*self.emission
         # (time)
+            logger.warning(weight.shape)
         
         if normalize is True:
-            weight = self.normalize_weight(weight=weight, res=res, study_area=study_area)
+            weight = self.normalize_weight(weight=weight, res=res, study_area=study_area).drop({'x_c','y_c','bin_n_t0'})
             logger.info('weight normalized by number of particles in bin at t0.')        
+            logger.warning(weight.shape)
 
         if decay_coef != 0:
         # decay rate. default is no decay, but this is still useful to give weight the correct shape
             logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
             y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
             weight = weight*y
+            logger.warning(weight.shape)
 
         # give weight correct shape
-        weight = weight.broadcast_like(self.ds.lon)
+        #weight = weight.broadcast_like(self.ds.lon)
         
         if assign is True:
-            self.ds = self.ds.assign({'weight': (('trajectory', 'time'), weight.data)}) 
+            #self.ds = self.ds.assign({'weight': (('trajectory', 'time'), weight.data)}) 
+            self.ds['weight'] = weight
             logger.info('updating weight variable in ds')
-
-        return weight
+        else:
+            return weight
     
 
 
-    def get_bin_n(self, res, t=None, study_area=None):
+    def get_bin_n(self, res, t=None, study_area=None, ds=None):
         '''
         Add new variable to ds ('bin_n_t0') containing its "bin number" at timestep t, i.e. a unique identifier corresponding to a specific spatial grid-cell. 
         
@@ -749,18 +801,25 @@ class PMAR(object):
         t : int
             index of timestep to consider
         '''
-      
-        ds = self.ds
+
+        # if i opened multiple seedings with mfdataset, this does not work, because most particles are inactive at the first timestep. 
+        #if 'seeding' in list(self.ds.dims):
+         #   ds = self.ds.bfill('time')
+        #else:
+         #   ds = self.ds
+        if ds is None:
+            ds = self.ds
+        
         if t is not None:
-            bin_n = self.grid.bin_n.sel(x_c=self.ds.isel(time=t).lon, y_c=self.ds.isel(time=t).lat, method='nearest')
+            bin_n = self.grid.bin_n.sel(x_c=ds.isel(time=t).lon, y_c=ds.isel(time=t).lat, method='nearest')
             logger.info(f'calculated bin number at timestep {t}.')
         else:
-            bin_n = self.grid.bin_n.sel(x_c=self.ds.lon, y_c=self.ds.lat, method='nearest')
+            bin_n = self.grid.bin_n.sel(x_c=ds.lon, y_c=ds.lat, method='nearest')
             logger.info(f'calculated bin number at all timesteps.')
         
         return bin_n
 
-    def get_histogram(self, res, study_area=None, weight=1, normalize=False, assign=True, dim=['trajectory', 'time'], block_size='auto', use=None, emission=None, decay_coef=0):
+    def get_histogram(self, res, study_area=None, weighted=True, dim=['trajectory', 'time'], block_size='auto'):
         '''
         "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
         from Stanev et al., 2019
@@ -774,19 +833,27 @@ class PMAR(object):
         
         '''
 
-        if self.seedings > 1:
-            logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
+#        if self.seedings > 1:
+#            logger.warning(f'this run contains {self.seedings} seedings. to get histogram of aggregated seedings, use .run() method. get_histogram() will only work on the last rep.')
 
-        xbin = self.grid.x_e
-        ybin = self.grid.y_e
+        if study_area is None:
+            study_area = self.study_area
+            
+        self.grid = make_grid(res=res, study_area=study_area)
+        xbin = self.grid.x_e.data
+        ybin = self.grid.y_e.data
         
         #self.get_ds
         
-        weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use=use, emission=emission, decay_coef=decay_coef, assign=assign)
-        logger.info('set_weights done.')
+        # weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use=use, emission=emission, decay_coef=decay_coef, assign=assign)
+        # logger.info('set_weights done.')
         
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
-        h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=dim, weights=weights.fillna(0.), block_size=block_size) 
+        if weighted == False:
+            weights = None
+        else:
+            weights = self.ds.weight.fillna(0.)
+        h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=dim, weights=weights, block_size=block_size) 
         # block_size='auto' was giving division by 0 error, which is a known bug: https://github.com/xgcm/xhistogram/issues/16
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
             
@@ -794,14 +861,14 @@ class PMAR(object):
 
         r = (
             xr.DataArray(h) 
-            .rio.write_nodata(np.nan)
+            .rio.write_nodata(0)#np.nan)
             .rio.write_crs('epsg:4326')
             .rio.write_coordinate_system())
 
         return r    
     
-    # to be deprecated
-    def ppi(self, res, use=None, emission=None, study_area=None, decay_coef=0, normalize=True): 
+    # this is not used in run. it is more if one wishes to create a ppi with different weights.
+    def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0): 
         '''
         Calculates ppi of pressure per grid-cell at any given time, based on given raster of use density. 
         ppi is calculated by assigning to each trajectory a weight that is equal to the use intensity at the trajectory's starting position.
@@ -818,65 +885,399 @@ class PMAR(object):
         study_area : list, optional
 
         decay_coef : float, optional
-
-        normalize : bool, optional
         
         '''
-        # if study_area is None:
-        #     study_area = self.extent # take whole basin
-        
-#        if use is None:
- #           logger.info('no use provided. calculating ppi from unity-use.')
-  #          self.use = xr.ones_like(self.grid.Xc)
-        
-        # if emission is not None:
-        #     self.emission = emission * self.tstep.seconds / timedelta(days=1).total_seconds() # convert to amount of pressure per my timestep
-        #     logger.warning(f'Converted emission from {emission} per day to {self.emission} per timestep.')
             
-        #weights = self.set_weights(res=res, study_area=study_area, use_path=use_path, decay_coef=decay_coef, normalize=normalize, assign=True)
+        self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
 
-        #### NEED TO DO THIS, BUT ONLY FOR LAST REP, IN A LOOP
-        # self._particle_path ? 
-        #self.ds = self.get_ds
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        #self.ppi_list.append(ppi_path)
         
-        r = self.get_histogram(res=res, study_area=study_area, normalize=True, assign=True, block_size=len(self.ds.time), use=use, decay_coef=decay_coef, emission=emission)#.assign_attrs({'use_path': use_path, 'emission':emission})
+        logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
+        # calculate ppi
+        if not self.output:
+            self.output = xr.Dataset()
+            
+        if ppi_exists == True:
+            # use import raster
+            self.output['ppi'] = rxr.open_rasterio(ppi_path).squeeze()
+        else:
+            self.set_weights(res=res, study_area=study_area, use=use, decay_coef=decay_coef, normalize=True, assign=True)
+            
+            r = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time)).rio.reproject_match(self.grid.mask) #.assign_attrs({'use_path': use_path, 'emission':emission})
+    
+            ppi = r / len(self.ds.time)
+                
+            self.output['ppi'] = ppi.rio.reproject_match(self.grid.mask)#.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
+
+            self.write_tiff(ppi, path=ppi_path)
         
-        return r
+        self.ppi_path = ppi_path
+            
+        pass
 
+    def plot_ppi(self, proj=None, cmap=None, filename=None):
+        from pmar.plotting import plot_map
+        import cartopy
+        if proj is None:
+            proj = cartopy.crs.epsg(4326)
 
-    def CM(self, cm_grid=None, res=None, t0=0, t1=-1):
+        transform = cartopy.crs.PlateCarree()
+        
+        Path(self.basedir / 'figures').mkdir(parents=True, exist_ok=True)  
+        if filename is not None:
+            filename=str(self.basedir)+f'/figures/{filename}'
+        fig, ax = plot_map(proj=proj, filename=filename)
+        self.output.ppi.where(self.output.ppi>0).plot(ax=ax, cmap=cmap, transform=transform)
+
+    # this does not include weights
+    def _get_CM(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=None):#, apply_landmask=False):
+        
+        if study_area is None:
+            study_area = self.study_area
+            
         ds = self.ds.isel(time=[t0,t1]) 
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
-                grid = self.xgrid(res=res, study_area=self.study_area)
+                grid = make_grid(res=res, study_area=study_area)
+                self.grid = grid
             else: # otherwise consider existing grid defined in .run()
                 grid = self.grid
-            cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c)
-            
+            #cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c) 
+            cm_grid = make_vector_grid(grid.bin_n.astype(float))
+
+        
         p_df = ds[['lon','lat']].to_dataframe().reset_index()
         p_gdf = gpd.GeoDataFrame(
                                 p_df,
                                 geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
                                 crs=cm_grid.crs
                                 )
-        l = np.zeros((len(ds.time), len(ds.trajectory), len(cm_grid)))
+        
+        ll = {0:{},1:{}}
+
         for t in range(2):
             for i, polys in enumerate(cm_grid.geometry):
                 poly = cm_grid.geometry.iloc[i]
-                l[t,:,i] = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].geometry.within(poly)
+                is_in_poly = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].set_index('trajectory').geometry.within(poly)
+                traj_in_poly = list(is_in_poly[is_in_poly].index)
+                ll[t][i] = traj_in_poly
         
-        Nij = np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
-        Pij = Nij.copy() #np.zeros((len(cm_grid), len(cm_grid))) # create empty array of given shape
+        _Nij_sparse = []
+        _Pij_sparse = []
+        _Pji_sparse = []
+        row = []
+        col = []
         
         for i in range(len(cm_grid)):
             for j in range(len(cm_grid)):
-                N = np.sum(l[0,:,i].astype(bool) & l[1,:,j].astype(bool)) # sums true in both arrays
-                Nij[i,j] = N
-                if l[0].sum(0)[i] > 0: # only divide if ni is >0 to avoid errors
-                    Pij[i, j] = N / l[0].sum(0)[i] # this is my pij
-        return l, Nij, Pij    
+                N = len(set(ll[0][i]).intersection(ll[1][j]))
+                if N > 0:
+                    _Nij_sparse.append(N)
+                    _Pij_sparse.append(N / len(ll[0][i]))
+                    _Pji_sparse.append(N / len(ll[1][j]))
+                    row.append(i)
+                    col.append(j)
+        
+        Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+        Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+        Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid)))).T
+        
+        self.cm_grid = cm_grid 
+        self.CM = Pij_sparse
+
+        if filename is not None:
+            mmwrite(filename, Pij_sparse)
+        
+        return Nij_sparse, Pij_sparse, Pji_sparse
+
+
+
+    def _get_Nij(self, cm_grid=None, res=None, study_area=None, weighted=False, t0=0, t1=-1, buffer=None):
+        
+        if study_area is None:
+            study_area = self.study_area
+            
+        ds = self.ds.ffill('time').isel(time=[t0,t1]) # V IMPORTANT, otherwise i miss beached particles and sum of CM rows is never equal to 1 
+        if cm_grid is None: # if no polygons are given, consider entire grid
+            if res is not None: # if a new resolution is given, create new grid
+                grid = make_grid(res=res, study_area=study_area)
+                self.grid = grid
+            else: # otherwise consider existing grid defined in .run()
+                grid = self.grid
+            #cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c) 
+            cm_grid = make_vector_grid(grid.bin_n.astype(float))
+        
+        if buffer is not None:
+            buff = cm_grid.dissolve().buffer(buffer)
+            diff = gpd.GeoDataFrame({cm_grid.columns.drop('geometry')[0]: -1234, 'geometry': buff.difference(cm_grid.dissolve())}, crs=cm_grid.crs)
+            cm_grid = pd.concat([cm_grid, diff]).reset_index(drop=True)
+        
+        self.cm_grid = cm_grid
+
+        df_cols = ['lon','lat']
+        if 'weighted' == True:
+            if 'weight' in self.ds.data_vars:
+                cols.append('weight')
+            else:
+                raise ValueError('no weight variable found in ds')
+            
+        p_df = ds[df_cols].to_dataframe().reset_index()
+        p_gdf = gpd.GeoDataFrame(
+                                p_df,
+                                geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
+                                crs=cm_grid.crs
+                                )
+        
+        ll = {0:{},1:{}}
+        # ll contains for each time (0,1), and for each polygon in cm_grid, the ids of the trajectories contained in it
+
+        for t in range(2):
+            for i, polys in enumerate(cm_grid.geometry):
+                poly = cm_grid.geometry.iloc[i]
+                is_in_poly = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].set_index('trajectory').geometry.within(poly)
+                traj_in_poly = list(is_in_poly[is_in_poly].index)
+                if 'weight' in p_gdf.columns:
+                    ll[t][i] = dict(zip(traj_in_poly, list(p_gdf.iloc[traj_in_poly]['weight'])))
+                else:
+                    ll[t][i] = traj_in_poly
+
+        return ll
+    
+    def get_Pij(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filename=None, weighted=False):        
+
+        ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1, buffer=buffer, weighted=weighted)
+        # _Nij_sparse = []
+        _Pij_sparse = []
+        # _Pji_sparse = []
+        row = []
+        col = []
+
+        for i in range(len(self.cm_grid)):
+            for j in range(len(self.cm_grid)):
+                N = len(set(ll[0][i]).intersection(ll[1][j]))
+                if N > 0:
+                    # _Nij_sparse.append(N)
+                    _Pij_sparse.append(N / len(ll[0][i]))
+                    # _Pji_sparse.append(N / len(ll[1][j]))
+                    row.append(i)
+                    col.append(j)
+        
+        # Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+        Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(self.cm_grid), len(self.cm_grid))))
+        # Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid)))).T
+        
+        #self.cm_grid = cm_grid 
+        self.CM = Pij_sparse
+
+        if filename is not None:
+            mmwrite(filename, Pij_sparse)
+            logger.info(f'wrote file {filename}')
+        
+        return Pij_sparse
+
+    def get_Pji(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=True):        
+
+        ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1)
+        # _Nij_sparse = []
+        # _Pij_sparse = []
+        _Pji_sparse = []
+        row = []
+        col = []
+        
+        for i in range(len(self.cm_grid)):
+            for j in range(len(self.cm_grid)):
+                N = len(set(ll[0][i]).intersection(ll[1][j]))
+                if N > 0:
+                    # _Nij_sparse.append(N)
+                    # _Pij_sparse.append(N / len(ll[0][i]))
+                    _Pji_sparse.append(N / len(ll[1][j]))
+                    row.append(i)
+                    col.append(j)
+        
+        # Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+        # Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+        Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(self.cm_grid), len(self.cm_grid)))).T
+        
+        #self.cm_grid = cm_grid 
+        #self.CM = Pij_sparse
+
+        if filename is not None:
+            mmwrite(filename, Pji_sparse)
+        
+        return Pji_sparse
+    
+
+    def plot_CM(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmax=None, norm=None, cmap='Greys'):
+        # use cm_grid for tick_labels
+        from pmar.plotting import plot_array
+        import matplotlib.pyplot as plt
+        CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array 
+        fig, ax = plt.subplots(figsize=figsize)
+        plot_array(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmax=vmax, norm=norm, cmap=cmap, ax=ax)
+
+    def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
+        '''
+        Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle found in cell {destination_idx} originated from the other cells?
+        '''
+        cm_grid = self.cm_grid
+        cm_grid[f'origin_of_{destination_idx}'] = Pji_sparse.toarray()[destination_idx]*100 
+        # check sum of probabilities is 100
+        print(cm_grid[f'origin_of_{destination_idx}'].sum(), '%')
+
+        fig, ax = plot_map()
+        im=cm_grid.plot(column=f'origin_of_{destination_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
+        ax.set_title('probability of each cell being the origin, \ngiven initial condition')
+        cm_grid.iloc[[destination_idx]].boundary.plot(color='k', linewidth=1, label='destination cell', ax=ax, linestyle='--')
+        plt.legend()
+        if annotate is True:
+            if len(cm_grid) < 400: # arbitrary
+                cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
+                for i in range(len(cm_grid)):
+                    ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
+
+        return cm_grid[f'origin_of_{destination_idx}']
+            
+
+    def plot_destination(self, Pij_sparse, origin_idx, annotate=False):
+        '''
+        Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle seeded in cell {origin_idx} will end up in the other cells?
+        '''
+        cm_grid = self.cm_grid
+        cm_grid[f'destination_of_{origin_idx}'] = Pij_sparse.toarray()[origin_idx]*100 
+        # check sum of probabilities is 100
+        print(cm_grid[f'destination_of_{origin_idx}'].sum(), '%')
+
+        fig, ax = plot_map()
+        im=cm_grid.plot(column=f'destination_of_{origin_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
+        ax.set_title('probability of each cell being the destination, \ngiven initial condition')
+        cm_grid.iloc[[origin_idx]].boundary.plot(color='k', linewidth=1, label='origin cell', ax=ax, linestyle='--')
+        plt.legend()
+        if annotate is True:
+            if len(cm_grid) < 400: # arbitrary
+                cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
+                for i in range(len(cm_grid)):
+                    ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
+
+        return cm_grid[f'destination_of_{origin_idx}']
+        
+    
+    def _predict_with_CM_np(self, initial_condition, CM=None):
+    # only works when CM is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
+        if CM is None:
+            CM = self.CM
+
+        _cm_prediction = np.matmul(initial_condition.ravel(), CM).reshape(initial_condition.shape)
+
+        cm_prediction = (xr.DataArray(_cm_prediction,
+                                      coords=dict(y_c=self.grid.y_c, x_c=self.grid.x_c, ))
+                         .rio.write_crs('epsg:4326'))
+        
+        self.cm_prediction = cm_prediction
+        
+        return cm_prediction
+        
+    def _predict_with_CM_xr(self, initial_condition, initial_condition_crs='epsg:4326', CM=None):
+    # only works when CM is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
+        if CM is None:
+            CM = self.CM.toarray() # my CM is now by default a sparse array, turn it into the full array to make predictions
+
+        initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject('epsg:4326').sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
+        
+        if initial_condition.data.ravel().shape[0] != CM.shape[0]:
+            logger.warning('initial_condition and CM dimensions do not match. clipping initial_condition to match cm_grid.')
+            initial_condition = initial_condition.rio.clip(self.cm_grid.geometry, self.cm_grid.geometry.crs, drop=True, all_touched=True)
+            initial_condition = initial_condition.where(initial_condition>=0)
+        else:
+            logger.info('initial_condition and CM dimensions match.')
+        
+        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
+        
+        CM_xr = xr.DataArray(CM, 
+                             coords = dict(origin=initial_condition_stack.origin, destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x_c_end', 'y_c':'y_c_end'}).destination))
+        
+        cm_prediction = CM_xr.dot(initial_condition_stack).unstack().rio.set_spatial_dims(x_dim='x_c_end',y_dim='y_c_end')
+        
+        self.cm_prediction = cm_prediction
+        
+        return cm_prediction
+
+
+    def predict_with_CM(self, initial_condition, initial_condition_crs='epsg:4326', CM=None, k=None, sum=False):
+    # only works when CM is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
+        if CM is None:
+            CM = self.CM # my CM is now by default a sparse array
+
+        initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject_match(self.grid.mask).sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
+
+        if initial_condition.data[~np.isnan(initial_condition.data)].shape[0] != CM.shape[0]:
+            logger.warning('initial_condition and CM dimensions do not match')#. clipping initial_condition to match cm_grid.')
+            initial_condition = initial_condition.rio.clip(self.cm_grid[self.cm_grid[list(self.cm_grid.columns.drop('geometry'))[0]] >=0].geometry, self.cm_grid.geometry.crs, drop=False, all_touched=True)
+            initial_condition = initial_condition.where(initial_condition>=0)
+        else:
+            logger.info('initial_condition and CM dimensions match.')
+        
+        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
+        print(initial_condition_stack.shape)
+        ## this would be for the case where an extra node was added to denote "everywhere else" outside of cm_grid.
+        ## but unstack obviously does not work, so can't return a datarray in lon, lat. only a sparse matrix. 
+        maxbin = int(self.grid.bin_n.max().data)
+        if len(self.cm_grid)-1 > maxbin:
+            logger.warning('adding extra node to network')
+            _initial_condition_stack = xr.concat([initial_condition_stack, xr.DataArray(data=[[1]], dims={'x_c':0, 'y_c':0}).stack(origin=('y_c','x_c'))], dim='origin')
+            print(_initial_condition_stack.shape)
+        else:
+            _initial_condition_stack = initial_condition_stack
+            print(_initial_condition_stack.shape)
+        
+        ic_sparse = diags(_initial_condition_stack.data, shape=(CM.shape), format='coo')
+
+        if k is not None:
+            if sum is True:
+                # like in Chamberlain et al. (2023), "the probability of a float sampling a given region within a range of time steps"
+                #CM = np.sum(matrix_power(CM, i) for i in range(1,k+1))
+                CM = self.CM
+                for i in range(2,k+1):
+                        CM += matrix_power(self.CM,i)
+            
+            else:
+                CM = matrix_power(CM, k)
+    
+            
+        cm_prediction_sparse = ic_sparse.dot(CM).sum(0)
+
+        # adding maxbin to exclude "dummy" node before reprojection
+        cm_prediction = xr.DataArray(np.array(cm_prediction_sparse)[0][:maxbin+1],
+                              coords = dict(destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x', 'y_c':'y'}).destination)).unstack().sortby('x').sortby('y').rio.write_crs(4326).rio.reproject_match(self.grid.mask)
+        # reproject match is needed to avoid tiny discrepancies in precision of x,y variables which cause the grids to mismatch
+        
+        self.cm_prediction = cm_prediction
+        self._cm_prediction_sparse = cm_prediction_sparse # in case it's needed to check what goes outside of system, or in "dummy" node
+        
+        return cm_prediction
 
     
+    def get_network(self, CM=None, node_names=None):
+        # use cm_grid['layer'].to_dict() for node_names
+        self.node_names = node_names
+        if CM is None:
+            CM = self.CM
+        G = nx.from_scipy_sparse_array(CM, create_using=nx.MultiDiGraph, edge_attribute='weight', parallel_edges=True) # important to specify DiGraph (directed graph) and parallel edges
+        if node_names is not None:
+            nx.set_node_attributes(G, values=node_names, name='node_name')
+        self.network = G
+        return G
+
+    def plot_network(self, node_shapes=None, show_map=False, rescale_edge=None, width=2, figsize=[7,7], extent=None, cmap=None):
+        from pmar.plotting import _plot_network
+        if node_shapes is True:
+            node_shapes = self.cm_grid
+            
+        _plot_network(self.network, node_shapes=node_shapes, show_map=show_map, width=width, rescale_edge=rescale_edge, figsize=figsize, extent=extent, cmap=cmap)
+        
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
     def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
@@ -938,7 +1339,7 @@ class PMAR(object):
         pass
     
 
-    def single_run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, crs='4326'):
+    def run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, pnum_per_shape=False, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, save_tiffs=False, crs='4326', output_dir=None):
         '''
         Compute trajectories and producing raster maps of ppi.
         
@@ -959,154 +1360,114 @@ class PMAR(object):
         output_dir : dict, optional
 
         '''
+
         self.res = res
 
-        #### SPATIAL DOMAIN
-        # establish study area
-        if seeding_shapefile is not None and seed_within_bounds is not None:
-             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
-#         elif seeding_shapefile is None:
-#             if study_area is None:
-#                 if seed_within_bounds is None:
-#                     logger.warning('No study area provided. Taking the whole basin as spatial domain. This may take up a lot of memory.')
-# #                    seed_within_bounds = self.extent
-#                 study_area = seed_within_bounds
-#             elif study_area is not None:
-#                 if seed_within_bounds is None:
-#                     seed_within_bounds = study_area
-#         elif seeding_shapefile is not None:
-#             if study_area is None:
-#                 study_area = gpd.read_file(seeding_shapefile).total_bounds
-        if seed_within_bounds is None and seeding_shapefile is None:
-            seed_within_bounds = self.context['extent']
-        
-        if seed_within_bounds is not None:
-#            seeding_shapefile = make_poly(seed_within_bounds)
-            #lon = seed_within_bounds[0::2]
-            #lat = seed_within_bounds[1::2]  
-            #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
-            q = self.basedir / 'polygons' / poly_path
-            #make_poly(lon, lat, crs=crs, save_to=str(q))
-            make_poly(seed_within_bounds, crs=crs, save_to=str(q))
-            seeding_shapefile = str(q)
-#            logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
-            logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
+        self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, pnum_per_shape=pnum_per_shape)
 
-        if study_area is None:
-            study_area = self.context['extent']
             
-#         if seeding_shapefile is None:
-# #            seeding_shapefile = make_poly(study_area)
-#             lon = study_area[0::2]
-#             lat = study_area[1::2]  
-#             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-#             q = self.basedir / 'polygons' / poly_path
-#             make_poly(lon, lat, crs=crs, save_to=str(q))
-#             seeding_shapefile = str(q)
-#             logger.info(f'created seeding_shapefile with bounds {lon},{lat}')
-
-        self.study_area = study_area
-        self.seeding_shapefile = seeding_shapefile 
-        self.seed_within_bounds = seed_within_bounds
-        logger.debug(f'study_area = {self.study_area}, seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
-        
-        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, duration_days=duration, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
-
-        logger.info(f'particle_path exists = {file_exists}, {file_path}')
-        logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
-
-        self.particle_path.append(file_path) 
-
-        self.grid = self.xgrid(res=res, study_area = study_area) # should be in init?
-
-        
-        #if use_path is a shapefile, rasterize it using geocube (NB: only tested with points)
-        # if use_path and Path(use_path).suffix == '.shp':
-        #     vector_use = gpd.read_file(use_path)
-        #     raster_use = rasterize_points_add(vector_use, res=res)
-        #     use_path = str(self.basedir)+use_path.split('/')[-1].split('.shp')[0]+'.tif'
-        #     raster_use.rio.to_raster(use_path)
-        #     logger.debug(f'Rasterized use: {use_path}')
-        
-        # if a file with that name already exists, simply import it  
-        if file_exists == True:
-            logger.info(f'Opendrift file with these configurations already exists within {self.basedir}. Importing.') 
-            #self.particle_path.append(file_path)
-            #self.ds = self.get_ds
-            self.seeding_shapefile = xr.open_dataset(self.particle_path[-1]).seeding_shapefile #take only last particle path
-            self.ds = xr.open_dataset(self.particle_path[-1])
-            #self.poly_path = self.ds.poly_path
-            # add weight to ds 
-            # this should only be done if the traj file already exists. so i'm assigning the weight to be able to see it but not recalculating it. 
-
-
-        # otherwise, run requested simulation
-        else:
-            self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff)
-            self.ds.to_netcdf(str(file_path))
-            logger.info(f"done. NetCDF file '{str(file_path)}' created successfully.") 
-
-        if use is None:
-            logger.info('no use provided. calculating ppi from unity-use.')
-            use = xr.ones_like(self.grid.Xc).rename({'x_c':'x', 'y_c':'y'})
-        else:
-            use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}), tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
-        self.use = use
-
-        # this should run whether or not there is already a particle or raster cache. so i can see the weight variable in ds.
-        self.set_weights(res=res, study_area=study_area, use=use, emission=emission, decay_coef=decay_coef, normalize=True, assign=True)   
-        
-        # # create dataset where all outputs will be stored
-        self.output = xr.Dataset()
-
-        # if use_label is None and use_path is not None:
-        #     use_label = str(use_path).split('/')[-1][:10]
+        ppi = self.get_ppi(res=res, study_area=study_area, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef)#, block_size=len(self.ds.time)) # weight have been assigned above, so no need to normalize or apply decay etc.
             
-        self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
-        
-        if output_dir is not None:
-            self.ppi_cache = PMARCache(output_dir['temp_ppi_output'])
 
-        # if not study_area:
-        #     raise ValueError('provide study_area')
-        #    if seed_within_bounds:
-        #        study_area = seed_within_bounds
-        #    elif seeding_shapefile:
-        #        study_area = gpd.read_file(seeding_shapefile).total_bounds
-        #    else:
-        #        study_area = self.extent # take whole basin
-
-        
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=pnum, ptot=None, start_time=start_time, duration=duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        self.ppi_path.append(ppi_path)
-        
-        logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
-        # calculate ppi
-
-        if ppi_exists == True:
-            self.output['ppi'] = rxr.open_rasterio(ppi_path).isel(band=0)
-        else:
-            #ppi = self.ppi(use=use, emission=emission, res=res, study_area=study_area, decay_coef=decay_coef)
-            ppi = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=True, block_size=len(self.ds.time), weight=self.ds.weight) # weight have been assigned above, so no need to normalize or apply decay etc.
-            
-            self.output['ppi'] = ppi.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
-                   
-
-            self.write_tiff(ppi, path=ppi_path)
         #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
         #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
 
         # other outputs
-        _h = self.get_histogram(res=res, study_area=study_area, normalize=False, assign=False, block_size=len(self.ds.time), dim=['trajectory'])
+        # _h = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time), dim=['trajectory'])
         
-        self.output['sum'] = _h.sum('time').rio.reproject_match(self.output['ppi'])
-        self.output['max'] = _h.max('time').rio.reproject_match(self.output['ppi'])
-        self.output['q9'] = _h.quantile(q=.9, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.output['ppi']) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
+        # self.output['sum'] = _h.sum('time').rio.reproject_match(self.grid.mask)
+        # self.output['max'] = _h.max('time').rio.reproject_match(self.grid.mask)
+        # self.output['q9'] = _h.quantile(q=.9, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
         
         pass
 
     
+    
+
+
+class PMARmulti(PMAR): 
+    """
+    Developed at CNR ISMAR in Venice.
+
+    ...
+
+    Attributes
+    ----------
+
+
+    Methods
+    -------
+
+
+    """
+        
+
+
+    def get_trajectories(self, pnum, start_time, seedings=1, tshift=0, end_time=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+
+        self.seedings = seedings
+        self.tshift = tshift
+        self.seeding_radius = seeding_radius
+        
+        for n in range(0, seedings):
+    
+            self.seeding_id = n
+            
+            start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
+            rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
+            if end_time is not None:
+                rep_duration = (datetime.strptime(end_time, '%Y-%m-%d') - start_time_dt).days
+            else:
+                rep_duration = duration_days
+            
+            logger.info(f'Starting rep #{self.seeding_id} with start_time = {rep_start_time}, end_time: {end_time}, and duration: {rep_duration}')
+            
+            #pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
+            
+            super().get_trajectories(pnum=pnum, start_time=rep_start_time, duration_days=rep_duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            logger.info(f'Done with rep #{n}.')
+            self.particle_list.append(self.particle_path)
+
+        self.import_trajectories(self.particle_list)
+
+    def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0): 
+        
+        ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
+
+        self.ppi_cache = PMARCache(ppi_output_dir)
+             
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        
+        self.output = xr.Dataset()
+        self.grid = make_grid(res=res, study_area=study_area)
+        
+        if ppi_exists == True:
+            logger.info('PPI with requested configurations found in cache.')
+            self.output['ppi'] = rxr.open_rasterio(ppi_path)
+        else:
+        
+            for pfile in self.particle_list:
+                temp_self = PMAR()
+                temp_self.__dict__ = self.__dict__
+                
+                temp_self.import_trajectories(pfile)
+                if hasattr(self, 'use') and self.use is not None: # to avoid re-rasterizing use for every seeding
+                    use = self.use
+                temp_self.get_ppi(res=res, use=use, use_label=use_label, emission=emission, study_area=study_area, decay_coef=decay_coef)
+                self.ppi_list.append(temp_self.ppi_path)
+                if hasattr(temp_self, 'use') and temp_self.use is not None: # to avoid errors if ppi already exists
+                    self.use = temp_self.use
+                  #  self.use_label = temp_self.use_label
+                del temp_self
+
+            self.import_trajectories(self.particle_list)
+            
+            self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding)
+            self.write_tiff(self.output['ppi'], path=ppi_path)
+            self.ppi_path = ppi_path
+        
+    
+
     def sum_seedings(self, rep_path):
         '''
         Sum ppi rasters of single seedings, return summed raster. 
@@ -1127,14 +1488,16 @@ class PMAR(object):
                     r1 = r0 + rxr.open_rasterio(rep)#.rio.reproject_match(r0, crs=r0.rio.crs, all_touched=True)
         
         return r1
-    
-    def run(self, ptot, seedings=1, tshift=0, duration=30, start_time='2019-01-01', tstep=timedelta(hours=1), seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, beaching=False, res=0.04, study_area=None, use=None, use_label=None, emission=None, hdiff=10, decay_coef=0):
+
+    # TODO import trajectories from particle_list even if multippi already exists
+    # can get particle_list from particle_cache
+    def run(self, pnum, start_time, duration, res, seedings=1, tshift=0, end_time=None, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, pnum_per_shape=False, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, crs='4326'):
         '''
         Compute trajectories and produce ppi raster over required number of seedings. 
     
         Parameters
         ----------
-        ptot : int
+        pnum : int
     
         seedings : int
     
@@ -1162,7 +1525,7 @@ class PMAR(object):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=ptot, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         
@@ -1170,261 +1533,36 @@ class PMAR(object):
             logger.info('PPI with requested configurations found in cache.')
             self.output['ppi'] = rxr.open_rasterio(ppi_path)
         else:
-            for n in range(0, seedings):
-
-                self.seeding_id = n
-                
-                start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
-                rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
-                
-                logger.info(f'Starting rep #{self.seeding_id} with start_time = {rep_start_time}')
-                
-                #rep_id = n # rep ID is maybe a better name than origin_marker! # self.rep_id
-                # this will have to go as an attribute in ds too, useful for plotting
-                
-                pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
-                
-                self.single_run(pnum=pnum, duration=duration, tstep=tstep, start_time=rep_start_time, res=res, seeding_shapefile=seeding_shapefile, study_area=study_area, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, use=use, use_label=use_label, emission=emission, hdiff=hdiff, decay_coef=decay_coef, save_tiffs=True)#output_dir = {'dt_output': dt_output_dir, 'rt_output': rt_output_dir, 'c_output': c_output_dir}, loglevel=loglevel)
-                logger.info(f'Done with rep #{n}.')
-    
-            #if use_path:
-            if seedings>1:
-                #rep_ppi_path = glob.glob(f'{ppi_output_dir}/*.tif') # this is problematic because it takes all tifs in that dir. could be older ones. # need to save the actual list of seeding files. 
-                logger.debug(f'ppi_path = {self.ppi_path}')
-                self.output['ppi'] = ppi = (('y','x'), self.sum_seedings(self.ppi_path).squeeze().values)
+            self.get_trajectories(pnum=pnum, start_time=start_time, seedings=seedings, tshift=tshift, end_time=end_time, duration_days=duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            self.get_ppi(res=res, use=use, use_label=use_label, emission=emission, study_area=study_area, decay_coef=decay_coef)
             
-            self.write_tiff(self.output['ppi'], path=ppi_path)
-        thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
-        self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
-
         pass
-        
-    
-    def plot(self, raster, title=None, xlim=None, ylim=None, cmap=spectral_r, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=cartopy.crs.epsg(3857), transform=cartopy.crs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, savepng=None):
-        """
-        Plot particle_raster outputs.
-        
-        Parameters
-        ----------
-        xlim, ylim : array-like, optional
-            Specify *x*- and *y*-axis limits.
-        cmap : matplotlib colormap name or colormap, optional
-            Plot colormap. Default is seaborn's 'spectral' map, reversed. 
-        shading : {'flat', 'nearest', 'gouraud', 'auto'}, optional
-            The fill style for the quadrilateral; defaults to
-            'flat' or :rc:`pcolor.shading`. Possible values:
-
-            - 'flat': A solid color is used for each quad. The color of the
-              quad (i, j), (i+1, j), (i, j+1), (i+1, j+1) is given by
-              ``C[i, j]``. The dimensions of *X* and *Y* should be
-              one greater than those of *C*; if they are the same as *C*,
-              then a deprecation warning is raised, and the last row
-              and column of *C* are dropped.
-            - 'nearest': Each grid point will have a color centered on it,
-              extending halfway between the adjacent grid centers.  The
-              dimensions of *X* and *Y* must be the same as *C*.
-            - 'gouraud': Each quad will be Gouraud shaded: The color of the
-              corners (i', j') are given by ``C[i', j']``. The color values of
-              the area in between is interpolated from the corner values.
-              The dimensions of *X* and *Y* must be the same as *C*. When
-              Gouraud shading is used, *edgecolors* is ignored.
-            - 'auto': Choose 'flat' if dimensions of *X* and *Y* are one
-              larger than *C*.  Choose 'nearest' if dimensions are the same.
-
-            See :doc:`/gallery/images_contours_and_fields/pcolormesh_grids`
-            for more description.
-        vmin, vmax : float, optional
-            Values to anchor the colormap, otherwise they are inferred from the
-            data and other keyword arguments. When a diverging dataset is inferred,
-            setting one of these values will fix the other by symmetry around
-            ``center``. Setting both values prevents use of a diverging colormap.
-            If discrete levels are provided as an explicit list, both of these
-            values are ignored. 
-        norm : matplotlib.colors.Normalize, optional
-            If ``norm`` has ``vmin`` or ``vmax`` specified, the corresponding
-            kwarg must be ``None``.
-        coastres : str or :class:`cartopy.feature.Scaler`, optional
-            A named resolution to use from the Natural Earth
-            dataset. Currently can be one of "auto" (default), "110m", "50m",
-            and "10m", or a Scaler object.
-        proj : {None, 'aitoff', 'hammer', 'lambert', 'mollweide', 'polar', 'rectilinear', str}, optional
-            The projection type of the `~.axes.Axes`. *str* is the name of
-            a custom projection, see `~matplotlib.projections`. The default
-            None results in a 'rectilinear' projection.
-            Default is cartopy.crs.PlateCarree().
-        dpi : float, default: :rc:`figure.dpi`
-            The resolution of the figure in dots-per-inch.
-        figsize : tuple, optional
-            A tuple (width, height) of the figure in inches.   
-        rivers : bool, optional
-            Whether to plot rivers. Default is False
-        save_fig : bool, optional
-            Whether to save figure as png. Default is True
-        """
-                
-        SMALL_SIZE = 8
-        MEDIUM_SIZE = 10
-        BIGGER_SIZE = 16
-        
-        ### this is actually creating problems in plots, commenting for now
-        # drop nan values to have cleaner thumbnails
-        #lon_var = [varname for varname in r.coords if "lon" in varname][0] # find name of lon variable
-        #lat_var = [varname for varname in r.coords if "lat" in varname][0] # find name of lat variable
-
-        r = raster.where(raster>0)
-        #r = r.dropna(str(lon_var), 'all').dropna(str(lat_var), 'all')
-        
-        fig = plt.figure(figsize=figsize)
-        ax = plt.axes(projection=proj)
-        ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
-        ax.add_feature(cartopy.feature.LAND, zorder=0, facecolor='0.9') #'#FFE9B5'
-        ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
-        if rivers is True:
-            ax.add_feature(cartopy.feature.RIVERS, zorder=12)
-        gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
-        gl.top_labels = False
-        gl.right_labels = False    
-
-        im = r.plot(vmin=vmin, vmax=vmax, norm=norm, shading=shading, cmap=cmap, add_colorbar=False, transform=transform)
-        #cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
-        cax = fig.add_axes([.92, 0.2, 0.02, 0.6])
-        cbar = plt.colorbar(im, cax=cax, extend='max')
-        cbar.set_label('uom from input layer', rotation=90)
-
-        ax.set_title(title)
-
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
 
 
-        plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
-        plt.rc('axes', titlesize=MEDIUM_SIZE)     # fontsize of the axes title
-        plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
-        plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-        plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-        plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
-        plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
-
-        if savepng is not None:
-            #Path(self.basedir / 'thumbnails').mkdir(parents=True, exist_ok=True) # useful for geoplatform to keep them in same dir as raster
-            plt.savefig(str(savepng), dpi=160, bbox_inches='tight')
-
-        return fig, ax
-
-    
-    def scatter(self, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='rainbow', coastres='10m', proj=cartopy.crs.PlateCarree(), transform=None, dpi=120, figsize=[10,7], rivers=False, save_to=None):
-        """
-        Visualise particle trajectories over time [days elapsed], defined by age_seconds. 
-        
-        
-        Parameters
-        ----------
-        t : int, optional
-            If a t is given, the scatter plot will represent the selected instant in time (int) or time interval (slice). Otherwise, it will show the entire trajectory (default). 
-        xlim, ylim : array-like, optional
-            Specify *x*- and *y*-axis limits.
-        s : float, optional
-            Marker size for scatter plot. Default is 1
-        c : str, optional
-            String defining variable used for colormap. Options are 'z' or 'age' (Default)
-        cmap : matplotlib colormap name or colormap, optional
-            Plot colormap. Default is seaborn's 'spectral' map, reversed. 
-        coastres : str or :class:`cartopy.feature.Scaler`, optional
-            A named resolution to use from the Natural Earth
-            dataset. Currently can be one of "auto" (default), "110m", "50m",
-            and "10m", or a Scaler object.
-        proj : {None, 'aitoff', 'hammer', 'lambert', 'mollweide', 'polar', 'rectilinear', str}, optional
-            The projection type of the `~.axes.Axes`. *str* is the name of
-            a custom projection, see `~matplotlib.projections`. The default
-            None results in a 'rectilinear' projection.
-            Default is cartopy.crs.PlateCarree().
-        dpi : float, default: :rc:`figure.dpi`
-            The resolution of the figure in dots-per-inch.
-        figsize : tuple, optional
-            A tuple (width, height) of the figure in inches.   
-        rivers : bool, optional
-            Whether to plot rivers. Default is False
-        """        
-        
-        O = np.floor(np.log10(len(self.ds.time)))
-
-        # subset of time
-        if t is None:
-            if O >= 3:
-                ds = self.ds.isel(time=slice(None,None,int(len(self.ds.time)/10**(O-2))))
+    def get_Pij(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filenames=None):
+        '''
+        Average transition matrix 
+        '''
+        for i, file in enumerate(self.particle_list):
+            logger.info(f'Calculating average CM out of {len(self.particle_list)} particle files.')
+            ds = xr.open_dataset(file).isel(time=slice(t0,t1))
+            temp_self = PMAR()
+            temp_self.__dict__ = self.__dict__
+            temp_self.import_trajectories(ds)
+            if hasattr(self, 'use') and self.use is not None: # to avoid re-rasterizing use for every seeding
+                temp_self.set_weights(use=self.use, res=res, study_area=study_area)
+                weighted=True
             else:
-                ds = self.ds
-        else:
-            ds = self.ds.isel(time=t)
+                weighted=False
 
-        # subset of trajectories
-        O = np.floor(np.log10(len(ds.trajectory)))
-        if O > 3:
-            ds = ds.isel(trajectory=slice(None,None,int(len(ds.trajectory)/10**(O-1))))
-        else:
-            ds = ds
-      
-        
-        if c == 'age': 
-            c = ds.age_seconds/60/60/24
-            #cmap = 'rainbow' #'copper'
-            cbar_label = 'elapsed days'
-        elif c == 'z':
-            c = ds.z
-            #cmap = 'viridis'
-            cbar_label = 'depth [m]'
-        elif c == 'marker':
-            c = ds.origin_marker
-            cbar_label = 'origin marker (#rep)'
-        
-        SMALL_SIZE = 8
-        MEDIUM_SIZE = 10
-        BIGGER_SIZE = 16
-        
-        fig = plt.figure(figsize=figsize)
-        ax = plt.axes(projection=proj)
-        ax.coastlines(coastres, zorder=11, color='k', linewidth=.5)
-        ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=10) #'#FFE9B5'
-        ax.add_feature(cartopy.feature.BORDERS, zorder=10, linewidth=.5, linestyle=':')
-        if rivers is True:
-            ax.add_feature(cartopy.feature.RIVERS, zorder=12)
-        gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=.5, color='gray', linestyle='--')
-        gl.top_labels = False
-        gl.right_labels = False    
-
-        im = ax.scatter(ds.lon, ds.lat, s=s, c=c, cmap=cmap, alpha=alpha, transform=transform)
-        cax = fig.add_axes([ax.get_position().x1+0.01,ax.get_position().y0,0.02,ax.get_position().height])
-        cbar = plt.colorbar(im, cax=cax)
-        cbar.set_label(cbar_label, rotation=90)
-        
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
-        
-        ax.set_title('Particle trajectories over time', fontsize=10);
-
-        plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
-        plt.rc('axes', titlesize=SMALL_SIZE)     # fontsize of the axes title
-        plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
-        plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-        plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
-        plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
-        plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
-        
-        if save_to is not None:
-            plt.savefig(save_to, dpi=160, bbox_inches='tight')
-        
-        return fig, ax
-    
-    
-    def animate(self):
-        """
-        WIP. Histogram animation using xmovie.
-        import custom_plotfunc from pmar_utils.
-        
-        """
-        
-        
-        pass
-
-
-    
+            if filenames is not None:
+                filename = filenames[i]
+                
+            temp_self.get_Pij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1, buffer=buffer, filename=filename, weighted=weighted)
+            if i == 0:
+                Pij = temp_self.CM/len(self.particle_list)
+            else:
+                Pij = Pij + temp_self.CM/len(self.particle_list)
+            del temp_self
+            logger.info(f'Done calculating CM for particle file {i}.')
+        self.CM = Pij
