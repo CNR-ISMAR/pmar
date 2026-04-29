@@ -16,6 +16,8 @@ from rasterio.enums import MergeAlg
 import logging
 import matplotlib.pyplot as plt
 from pathlib import Path
+from geocube.vector import vectorize 
+
 logger = logging.getLogger('pmar')
 
 
@@ -89,6 +91,64 @@ def _make_poly(lon, lat, crs='4326', save_to=None):
 
     return poly
 
+def make_grid(res, study_area, crs='epsg:4326'):
+    
+    #if study_area is None:
+      #  study_area = self.study_area
+
+    shpfilename = shpreader.natural_earth(resolution='10m',
+            category='physical',
+            name='ocean')
+    ocean = gpd.read_file(shpfilename)
+        
+    xmin, ymin, xmax, ymax = study_area
+    cols = np.arange(xmin, xmax + res, res)            
+    rows = np.arange(ymin, ymax + res, res)
+
+    # outer cell edges
+    x_e = cols 
+    y_e = rows
+    
+    # cell centres
+    x_c = (x_e + res/2)[:-1]
+    y_c = (y_e + res/2)[:-1]     
+
+    grid = xr.Dataset(coords={'x_e':x_e, 'y_e':y_e, 'x_c':x_c, 'y_c':y_c}).rio.write_crs(crs, inplace=True)
+
+    grid['dx'] = grid['dy'] = res
+
+    Xc, Yc = np.meshgrid(grid.x_c, grid.y_c)
+    grid = grid.assign({'Xc': (('y_c', 'x_c'), Xc), 'Yc': (('y_c', 'x_c'), Yc)}) #dataarrays 
+
+    mask = xr.ones_like(grid.Xc).rename({'x_c':'x','y_c':'y'}).rio.clip(ocean.geometry, ocean.crs, drop=False, all_touched=True).rename({'x':'x_c','y':'y_c'})
+    bin_n = mask.where(mask!=1, mask.stack(cell=('y_c', 'x_c')).where(lambda x: x == 1).cumsum("cell").unstack())-1#np.arange(0,Xc.size).reshape((len(y_c), len(x_c))))
+    
+    grid['mask'] = mask
+    grid['bin_n'] = bin_n#.astype(int)
+    
+    #grid = grid.assign({'bin_n': (('y_c','x_c'), bin_n.where(bin_n>0)),
+     #                  'mask': (('y_c','x_c'), mask)})
+    
+    
+    # grid = Grid(grid, 
+    #             coords={"X": {"center": "x_c", "outer": "x_e"}, 
+    #                    'Y': {"center": "y_c", "outer": "y_e"}}, 
+    #             metrics = {
+    #     ('X',): ['dx'], # X distances
+    #     ('Y',): ['dy']},
+    #            periodic=False)
+
+    return grid
+
+def make_vector_grid(raster_grid, buffer=None):
+    vector_grid = vectorize(raster_grid).dropna()
+    if buffer is not None:
+        buff = vector_grid.dissolve().buffer(buffer)
+        diff = gpd.GeoDataFrame({vector_grid.columns.drop('geometry')[0]: -1234, 'geometry': buff.difference(vector_grid.dissolve())}, crs=vector_grid.crs)
+        vector_grid = pd.concat([vector_grid, diff]).reset_index(drop=True)
+    return vector_grid
+
+    
 def get_marine_polygon(basin=None):
     '''
     Returns gdf with polygon of requested basin, to be used with OpenDrift's seed_from_polygon.
@@ -127,7 +187,7 @@ def rasterhd2raster(raster_hd, grid):
              )                                                                                                                                                                          
     return raster 
     
-def rasterize_points_add(point_data, like, measurements=None):
+def _rasterize_points_add(point_data, like, measurements=None):
     '''
     Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
     '''
@@ -136,7 +196,38 @@ def rasterize_points_add(point_data, like, measurements=None):
                     #resolution=(-res, res), 
                     fill=0,
                     rasterize_function=partial(rasterize_image, merge_alg=MergeAlg.add, fill=0, all_touched=True, filter_nan=True))
-    logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
+    if measurements is None:
+        logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
+    return raster_data
+
+def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
+    '''
+    Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
+    '''
+    if len(vector_data.geom_type.value_counts()) > 1:
+        raise ValueError('please provide vector_data with a single geometry type, e.g. only polygons or only points.')
+    
+    elif vector_data.geom_type[0] == 'Point':
+        merge_alg = MergeAlg.add
+        measurements=[str(column_to_burn)]
+        _like = like.copy()
+    
+    elif vector_data.geom_type[0] == 'Polygon':
+        merge_alg = MergeAlg.replace
+        vector_data[f'rescaled_{column_to_burn}'] = vector_data[str(column_to_burn)] / vector_data.geometry.area
+        measurements=[f'rescaled_{column_to_burn}']
+        _like = like.rio.reproject(dst_crs=like.rio.crs, resolution=[like.rio.resolution()[0]/3,like.rio.resolution()[1]/3 ], resampling=Resampling.average) # this gives a ~10% error on polygon edges
+
+    raster_data = make_geocube(vector_data=vector_data, measurements=measurements, 
+                    like=_like,
+                    #resolution=(-res, res), 
+                    fill=0,
+                    rasterize_function=partial(rasterize_image, fill=0, merge_alg=merge_alg, all_touched=all_touched, filter_nan=True)).to_array().squeeze()
+
+    if vector_data.geom_type[0] == 'Polygon':
+        cell_area = abs(like.rio.resolution()[0])*abs(like.rio.resolution()[1])
+        raster_data = raster_data.rio.reproject_match(like, resampling=Resampling.average)*cell_area
+    
     return raster_data
 
 
@@ -151,21 +242,21 @@ def harmonize_use(use, res, study_area, like, tstep=None):
         if Path(use).suffix == '.shp':
             logger.debug('use is shapefile')
             vector_use = gpd.read_file(use)
-            print('SHP USE TOTAL BOUNDS', vector_use.total_bounds)
+            #logger.debug('SHP USE TOTAL BOUNDS', vector_use.total_bounds)
         elif Path(use).suffix == '.tif':
             raster_use = rxr.open_rasterio(use).squeeze()
-            print('TIF USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max())            
+            #logger.debug('TIF USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data)            
             logger.debug('use is tif')
 
     except:     
         if type(use) is gpd.geodataframe.GeoDataFrame:
             logger.debug('use is geopandas dataframe')
             vector_use = use
-            print('GPD USE TOTAL BOUNDS', vector_use.total_bounds)
+            #logger.debug('GPD USE TOTAL BOUNDS', vector_use.total_bounds)
         elif type(use) is xr.core.dataarray.DataArray:
             logger.debug('use is xarray')
             raster_use = use
-            print('RXR USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
+            #logger.debug('RXR USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
         else:
             logger.debug('use is none of the above')
 
@@ -174,28 +265,29 @@ def harmonize_use(use, res, study_area, like, tstep=None):
             raise ValueError('Too many columns in GeoDataFrame. Please provide shapefile with only one variable to burn into raster, other than geometry.')
         elif len(list(vector_use.columns.drop('geometry'))) < 1:
             raise ValueError('No columns found other than geometry. No values to burn into raster cells.')
-        raster_use = rasterize_points_add(vector_use, like=like, measurements=list(vector_use.columns.drop('geometry'))).to_dataarray()
+        raster_use = rasterize_conserve(vector_use, like=like, column_to_burn=list(vector_use.columns.drop('geometry'))[0]).rio.reproject_match(like)
         logger.debug(f'rasterized vector_use to res = {res}')
-        print('Rasterized USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
+        #logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
         
-    raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
+    #raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
     logger.debug('use_raster successfully reprojected')
-    print('Rasterized USE TOTAL BOUNDS', raster_use.x.min(), raster_use.x.max(), raster_use.y.min(), raster_use.y.max()) 
+    #logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
     # need a dataarray
-    use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
-    print('Resampled USE TOTAL BOUNDS', use.x.min(), use.x.max(), use.y.min(), use.y.max()) 
-    logger.debug('use_raster successfully resampled')
-    if len(use.shape) > 2:
-        use = use[0]
+    #use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
+    #logger.debug('Resampled USE TOTAL BOUNDS', use.x.min().data, use.x.max().data, use.y.min().data, use.y.max().data) 
+    # logger.debug('use_raster successfully resampled')
+    # if len(use.shape) > 2:
+    #     use = use[0]
         
-    use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+#    use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
 
     # convert use from quantity/day into quantity/timestep
     # timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
     # use = use / timesteps_per_day
     
-    logger.debug(f'final use has shape {use.shape}')
-    return use
+    logger.debug(f'final use has shape {raster_use.shape}')
+    return raster_use
+    del vector_use, raster_use
 
 
 def check_particle_file(path_to_file):
@@ -216,43 +308,3 @@ def traj_distinct(bin_n, weight):
             w[t] = 0
     return w
     
-
-def plot_map(coastres='10m', figsize=[8,6], dpi=120, proj=cartopy.crs.PlateCarree(),  extent=None, title=''):
-    fig = plt.figure(figsize=figsize)
-    ax = plt.axes(projection=proj)
-    ax.coastlines(coastres, zorder=12, color='k', linewidth=.7)
-    ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2, alpha=0.5)
-    ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
-    if extent is not None:
-        ax.set_extent(extent, crs=cartopy.crs.PlateCarree()) # since some values are 1e36, if i dont set this I see an empty map
-    
-    gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
-    #levels=np.array([1,10,100,1000])
-    gl.top_labels = False
-    gl.right_labels = False
-    
-    ax.set_title(title)
-    
-    return fig, ax 
-    
-
-def custom_plotfunc(ds, fig, tt, *args, **kwargs):
-    '''
-    For pmar.animate. WIP.
-    it works but it writes a blank video to mp4.
-    '''
-    
-    fig = plt.figure()
-    ax = plt.axes(projection=cartopy.crs.PlateCarree())
-    ax.coastlines('10m', zorder=12, color='k', linewidth=.7)
-    ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2)
-    ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
-    gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
-    #levels=np.array([1,10,100,1000])
-    gl.top_labels = False
-    gl.right_labels = False
-
-    # Colorlimits need to be fixed or your video is going to cause seizures.
-    ds.isel(time=tt).plot(ax=ax, cmap=spectral_r, vmin=0, vmax=ds.max())
-    ax.set_title('');
-    return None, None
