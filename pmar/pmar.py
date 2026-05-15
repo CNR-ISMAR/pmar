@@ -38,7 +38,7 @@ from rasterio.enums import Resampling
 #from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
-from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus
 #from cmap import Colormap
 #from pmar.plotting import plot_map
 from scipy.sparse import coo_array
@@ -79,11 +79,11 @@ class PMAR(object):
     """
 
 
-    def __init__(self, context='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
+    def __init__(self, spatial_domain='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
         """
         Parameters
         ---------- 
-        context : str or list, optional
+        spatial_domain : str or list, optional
             If str, an ocean basin for which CMEMS readers are available. Otherwise, a list of paths of files to be imported as OpenDrift readers. Default is 'global'
         pressure : str, optional
 
@@ -150,13 +150,15 @@ class PMAR(object):
 
         self.set_pressure(pressure)
 
-        # define context
-        if context is not None:
+        # define spatial_domain
+        if spatial_domain is not None:
             try: 
-                self.context = self.get_context(str(context))
+                self.spatial_domain = get_copernicus(str(spatial_domain))
+                self.extent = self.spatial_domain['extent']
+
             except:
                 # alternatively, provide paths to readers manually
-                self.context = {'readers': dict(zip(range(0,len(context)),context))}
+                self.spatial_domain = {'readers': dict(zip(range(0,len(spatial_domain)),spatial_domain))}
         
         # if a path to a shapefile is given to be used for seeding, read it and save it in the pmar_output/polygons dir
         # why save it locally????
@@ -183,71 +185,6 @@ class PMAR(object):
         self.pressure = pressure
         self.opendrift_module = pressures[pressure]['opendrift_module']
         logger.info(f'initializing pressure {self.pressure} with opendrift module {self.opendrift_module}')
-
-    def get_context(self, context):
-        """
-        Parameters
-        ---------- 
-        context : str
-            One of 'global', 'med', 'black sea', 'baltic'. Returns strings to relevant Copernicus products to add as OpenDrift readers. 
-        """
-        
-        contexts = {'global': 
-                        {'readers': 
-                         {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
-                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
-                          'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
-                          #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
-                          'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
-                          'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
-                         },
-                        'extent': [-180, -80, 179.92, 90],
-                        'polygon': None# get_marine_polygon()
-                        },
-                        
-                        'med': 
-                        {'readers':
-                         {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
-                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
-                          'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
-                          'mixed-layer': 'cmems_mod_med_phy-mld_my_4.2km_P1D-m', # Mediterranean Sea Physics Reanalysis
-                          'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
-                         },
-                         'extent': [-6, 30.19, 36.29, 45.98],
-                         'polygon': None,
-                        }, 
-                        
-                        'black sea': 
-                        {'readers': 
-                         {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
-                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
-                          'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
-                          'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
-                          'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
-                         }, 
-                        'extent': [27.25, 40.5, 42, 47],
-                        'polygon': None
-                        },
-                        
-                        'baltic': 
-                        {'readers': 
-                         {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
-                          'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
-                          'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
-                          'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 
-                          'stokes': 'cmems_mod_bal_wav_my_PT1H-i',
-                         },
-                         'extent': [9.04, 53.01, 30.21, 65.89],
-                         'polygon': None,
-                        }
-            }
-
-        if context not in contexts.keys():
-            raise ValueError('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
-            
-        self.extent = contexts[context]['extent']
-        
-        return contexts[context]
 
     
     def _make_grid(self, res, study_area=None, crs='epsg:4326'):
@@ -332,7 +269,7 @@ class PMAR(object):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
     
-    def get_trajectories(self, pnum, start_time, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -345,12 +282,14 @@ class PMAR(object):
         
         Parameters
         ----------
-        context : str
-            String defining the context of the simulation i.e., the model data to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
+        spatial_domain : str
+            String defining the spatial_domain of the simulation i.e., the model data to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
         pnum : int 
             The number of particles to be seeded
         start_time : str
             The start date of the simulation, in string format 'dd-mm-yyyy'
+        seed_time : timedelta, optional
+            for continuous release of particles
         duration_days : int, optional
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
         seeding_shapefile : str, optional
@@ -384,6 +323,7 @@ class PMAR(object):
         self.seeding_radius = seeding_radius
         self.pnum = pnum
         self.start_time = start_time
+        self.seed_time = seed_time
         self.duration = duration_days
 
         #### SPATIAL DOMAIN
@@ -392,7 +332,7 @@ class PMAR(object):
              raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
             
         if seed_within_bounds is None and seeding_shapefile is None:
-            seed_within_bounds = self.context['extent']
+            seed_within_bounds = self.spatial_domain['extent']
         
         if seed_within_bounds is not None:
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
@@ -403,14 +343,14 @@ class PMAR(object):
             logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
 
         if study_area is None:
-            study_area = self.context['extent']
+            study_area = self.spatial_domain['extent']
 
         self.study_area = study_area
         self.seeding_shapefile = seeding_shapefile 
         self.seed_within_bounds = seed_within_bounds
         logger.debug(f'study_area = {self.study_area}, seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
 
-        file_path, file_exists = self.cache.particle_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
+        file_path, file_exists = self.cache.particle_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
@@ -428,10 +368,9 @@ class PMAR(object):
             #     termvel = self.termvel
             
             ### time settings ####
-
             start_time = datetime.strptime(start_time, '%Y-%m-%d')
-            end_time = start_time + timedelta(days=duration_days) # this is printed in particle_path
-            time_step = tstep
+            
+            #time_step = tstep
     
             duration = timedelta(days=duration_days)
 
@@ -448,10 +387,6 @@ class PMAR(object):
     
                 logger.info(f'seeding particles evenly within shapefile {self.seeding_shapefile}')
                 #self.seeding_shapefile = seeding_shapefile
-            
-            # path to write particle simulation file. also used for our 'cache'    
-            t0 = start_time.strftime('%Y-%m-%d')
-            t1 = end_time.strftime('%Y-%m-%d')
             
                 
             # initialise OpenDrift object
@@ -529,13 +464,13 @@ class PMAR(object):
                     self.o.add_reader(r)#, variables=['x_sea_water_velocity', 'y_sea_water_velocity'])
     
             else:
-            #if self.context:
+            #if self.spatial_domain:
                 readers = []
-                # add predefined readers from context
-                for var in self.context['readers']:
-                    readers.append(Reader(dataset_id=self.context['readers'][var]))
-                self.o.add_reader(readers) # add all readers for that context.
-                #self.o.add_readers_from_list(self.context['readers'].values()) # this will add readers lazily, and only read them if useful. 
+                # add predefined readers from spatial_domain
+                for var in self.spatial_domain['readers']:
+                    readers.append(Reader(dataset_id=self.spatial_domain['readers'][var]))
+                self.o.add_reader(readers) # add all readers for that spatial_domain.
+                #self.o.add_readers_from_list(self.spatial_domain['readers'].values()) # this will add readers lazily, and only read them if useful. 
         
     
             ##### SEEDING #####
@@ -556,11 +491,9 @@ class PMAR(object):
             if pnum_per_shape is True:
                 seeding_polygon = gpd.read_file(self.seeding_shapefile)
                 for shape in range(len(seeding_polygon)):
-                    self.o.seed_from_geopandas(geodataframe=seeding_polygon.iloc[[shape]], number=pnum, time=start_time, 
-                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id)
+                    self.o.seed_from_geopandas(geodataframe=seeding_polygon.iloc[[shape]], number=pnum, time=[start_time, start_time + seed_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id)
             else:
-                self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=start_time, 
-                                       terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
+                self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=[start_time, start_time + seed_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
     
     
             logger.info('running opendrift...')
@@ -572,8 +505,8 @@ class PMAR(object):
                 if len(self.particle_path)>1:
                     raise ValueError('opendrift outfile must be string')
             
-            self.o.run(duration=duration, #end_time=end_time, 
-                       time_step=time_step, #time_step_output=timedelta(hours=24), 
+            self.o.run(duration=duration, 
+                       time_step=tstep, #time_step_output=timedelta(hours=24), 
                        outfile=str(self.particle_path), #temp_outfile, 
                        export_variables=['lon', 'lat', 'z', 'status', 'age_seconds', 'origin_marker', 'specie', 'sea_floor_depth_below_sea_level', 'weight', 'length']) # 'ocean_mixed_layer_thickness', 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind',
     
@@ -890,7 +823,7 @@ class PMAR(object):
             
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
 
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         #self.ppi_list.append(ppi_path)
         
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
@@ -998,7 +931,9 @@ class PMAR(object):
         if study_area is None:
             study_area = self.study_area
             
-        ds = self.ds.ffill('time').isel(time=[t0,t1]) # V IMPORTANT, otherwise i miss beached particles and sum of CM rows is never equal to 1 
+        ds = self.ds.ffill('time').isel(time=[t0,t1]) # V IMPORTANT, otherwise i miss beached particles and sum of CM rows is never equal to 1 , whereas bfill is needed for datasets with continuous seeding
+        
+        
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
                 grid = make_grid(res=res, study_area=study_area)
@@ -1108,13 +1043,48 @@ class PMAR(object):
         return Pji_sparse
     
 
-    def plot_CM(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmax=None, norm=None, cmap='Greys'):
+    def plot_CM(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap='Greys', mask=None):
         # use cm_grid for tick_labels
         from pmar.plotting import plot_array
         import matplotlib.pyplot as plt
         CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array 
+        
+        if mask is not None:
+            mask = CM<=mask
+
+        if annot == True:
+            CM = np.round(CM,2)
+            
         fig, ax = plt.subplots(figsize=figsize)
-        plot_array(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmax=vmax, norm=norm, cmap=cmap, ax=ax)
+        plot_array(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask, ax=ax)
+
+    def dispersal_distance(self, CM=None, cm_grid=None):
+        '''
+        "as the crow flies" dispersal distance from connectiviy matrix
+        '''
+        if cm_grid is None:
+            cm_grid = self.cm_grid
+
+        if CM is None:
+            CM = self.CM
+            
+        cm_grid = cm_grid.to_crs(32601)
+        
+        disp_dist = np.zeros(len(cm_grid))
+        for i in range(len(cm_grid)):
+            CM_row = CM.tocsr()[i,:] # convert to scipy.csr so i can index by row
+            if CM_row.sum()>0:
+                D_col = np.array([cm_grid.geometry.centroid.iloc[i].distance(cm_grid.geometry.centroid.iloc[j])*1e-3 for j in range(len(cm_grid))])
+                disp_dist[i] = CM_row@D_col
+            else:
+                disp_dist[i] = np.nan
+
+        disp_dist = xr.DataArray(disp_dist,
+                  coords = {'bin':self.grid.bin_n.stack(bin=('y_c','x_c')).dropna('bin').bin}).unstack().sortby('x_c').sortby('y_c').rio.write_crs(4326)#.rio.reproject_match(self.grid.mask)
+        
+        self.disp_dist = disp_dist
+        return disp_dist
+    
 
     def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
         '''
@@ -1403,7 +1373,7 @@ class PMARmulti(PMAR):
         
 
 
-    def get_trajectories(self, pnum, start_time, seedings=1, tshift=0, end_time=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), seedings=1, tshift=0, end_time=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
 
         self.seedings = seedings
         self.tshift = tshift
@@ -1412,7 +1382,7 @@ class PMARmulti(PMAR):
         for n in range(0, seedings):
     
             self.seeding_id = n
-            
+
             start_time_dt = datetime.strptime(start_time, '%Y-%m-%d')+timedelta(days=tshift)*n #convert start_time into datetime to add tshift
             rep_start_time = start_time_dt.strftime("%Y-%m-%d") # bring back to string to feed to opendrift
             if end_time is not None:
@@ -1424,7 +1394,7 @@ class PMARmulti(PMAR):
             
             #pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
             
-            super().get_trajectories(pnum=pnum, start_time=rep_start_time, duration_days=rep_duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            super().get_trajectories(pnum=pnum, start_time=rep_start_time, seed_time=seed_time, duration_days=rep_duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
             logger.info(f'Done with rep #{n}.')
             self.particle_list.append(self.particle_path)
 
@@ -1436,7 +1406,7 @@ class PMARmulti(PMAR):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         self.grid = make_grid(res=res, study_area=study_area)
@@ -1525,7 +1495,7 @@ class PMARmulti(PMAR):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.context, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(spatial_domain=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         
         self.output = xr.Dataset()
         

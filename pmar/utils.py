@@ -21,6 +21,75 @@ from geocube.vector import vectorize
 logger = logging.getLogger('pmar')
 
 
+def get_copernicus(spatial_domain):
+    """
+    Parameters
+    ---------- 
+    context : str
+        One of 'global', 'med', 'black sea', 'baltic'. Returns strings to relevant Copernicus products to add as OpenDrift readers. 
+    """
+    
+    spatial_domains = {'global': 
+                    {'readers': 
+                     {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
+                      'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
+                      #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
+                      'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                      'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                     },
+                    'extent': [-180, -80, 179.92, 90],
+                     'label': 'CMEMS_Global_Renalysis'
+                    },
+                    
+                    'med': 
+                    {'readers':
+                     {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
+                      'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
+                      'mixed-layer': 'cmems_mod_med_phy-mld_my_4.2km_P1D-m', # Mediterranean Sea Physics Reanalysis
+                      'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                     },
+                     'extent': [-6, 30.19, 36.29, 45.98],
+                    'label': 'CMEMS_Mediterranean_Renalysis'
+
+                    }, 
+                    
+                    'black sea': 
+                    {'readers': 
+                     {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                      'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
+                      'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
+                      'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
+                     }, 
+                    'extent': [27.25, 40.5, 42, 47],
+                    'label': 'CMEMS_Black_Sea_Renalysis'
+
+                    },
+                    
+                    'baltic': 
+                    {'readers': 
+                     {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
+                      'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4, 
+                      'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
+                      'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 
+                      'stokes': 'cmems_mod_bal_wav_my_PT1H-i',
+                     },
+                     'extent': [9.04, 53.01, 30.21, 65.89],
+                    'label': 'CMEMS_Baltic_Sea_Renalysis'
+
+                    }
+        }
+
+    if spatial_domain not in spatial_domains.keys():
+        raise ValueError('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+        
+    #self.extent = spatial_domains[spatial_domain]['extent']
+    
+    return spatial_domains[spatial_domain]
+
+
 def make_poly(bounds, crs='4326', save_to=None):
     df = pd.DataFrame()
     df['ID'] = ['seeding_polygon']
