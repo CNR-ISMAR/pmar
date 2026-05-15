@@ -17,8 +17,8 @@ tol_muted = Colormap('tol:muted').to_mpl()
 rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
 tol_div = Colormap('tol:BuRd').to_mpl()
 
-def plot_map(subplot_rows=1, subplot_cols=1, proj=cartopy.crs.PlateCarree(), extent=None, coastres='10m', figsize=[8,6], title='', filename=None):
-    fig, axs = plt.subplots(subplot_rows, subplot_cols, figsize=figsize, subplot_kw={'projection':proj})
+def plot_map(subplot_rows=1, subplot_cols=1, sharex=False, sharey=False, proj=cartopy.crs.PlateCarree(), extent=None, coastres='10m', figsize=[8,6], title='', filename=None):
+    fig, axs = plt.subplots(subplot_rows, subplot_cols, sharex=sharex, sharey=sharey, figsize=figsize, subplot_kw={'projection':proj})
     for ax in fig.axes:
         ax.coastlines(coastres, zorder=12, color='k', linewidth=.7)
         ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2, alpha=0.5)
@@ -38,16 +38,13 @@ def plot_map(subplot_rows=1, subplot_cols=1, proj=cartopy.crs.PlateCarree(), ext
     
     return fig, axs
 
-def plot_array(array, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmax=None, norm=None, cmap=tol_inc, ax=None):
+def plot_array(array, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap=tol_inc, ax=None, mask=None):
     # use cm_grid for tick_labels
-    
-    #CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array 
     
     if len(array) > 30:
         annot = False
         
-    #fig, ax = plt.subplots(figsize=figsize)
-    sns.heatmap(array, annot=annot, linewidths=linewidths, square=True, ax=ax, vmax=vmax, norm=norm, cmap=cmap)
+    sns.heatmap(array, annot=annot, linewidths=linewidths, square=True, ax=ax, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask)
     ax.set_ylabel('FROM')
     ax.set_xlabel('TO')
     ax.xaxis.tick_top()
