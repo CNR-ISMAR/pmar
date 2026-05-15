@@ -133,6 +133,8 @@ class PMAR(object):
         self.reader_type = reader_type
         self.particle_list = []
         self.output = None
+        self.seeding_radius = None
+        self.start_time = None
         
         # set up logger 
         logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
@@ -799,6 +801,22 @@ class PMAR(object):
             .rio.write_coordinate_system())
 
         return r    
+
+    def get_indicators(self, res, study_area, quantile=.9):
+        # other indicators
+        if hasattr(self.ds, 'weight'):
+            weighted = True
+        else:
+            weighted = False
+            
+        _h = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time), dim=['trajectory'], weighted=weighted)
+
+        if not self.output:
+            self.output = xr.Dataset()
+        
+        self.output['SUM'] = _h.sum('time').rio.reproject_match(self.grid.mask)
+        self.output['MAX'] = _h.max('time').rio.reproject_match(self.grid.mask)
+        self.output[f'Q{str(int(quantile*100))}'] = _h.quantile(q=quantile, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
     
     # this is not used in run. it is more if one wishes to create a ppi with different weights.
     def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0): 
@@ -1307,7 +1325,11 @@ class PMAR(object):
         
         logger.info(f'Wrote tiff to {path}.')
         pass
-    
+
+
+
+
+        
 
     def run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, pnum_per_shape=False, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, save_tiffs=False, crs='4326', output_dir=None):
         '''
@@ -1336,22 +1358,12 @@ class PMAR(object):
         self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, pnum_per_shape=pnum_per_shape)
 
             
-        ppi = self.get_ppi(res=res, study_area=study_area, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef)#, block_size=len(self.ds.time)) # weight have been assigned above, so no need to normalize or apply decay etc.
-            
-
-        #thumb_ppi_path = str(ppi_path).split('.tif')[0]+'.png'
-        #self.plot(self.output['ppi'], title=use_label, savepng=thumb_ppi_path)
-
-        # other outputs
-        # _h = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time), dim=['trajectory'])
+        self.get_ppi(res=res, study_area=study_area, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef)#, block_size=len(self.ds.time)) # weight have been assigned above, so no need to normalize or apply decay etc.
         
-        # self.output['sum'] = _h.sum('time').rio.reproject_match(self.grid.mask)
-        # self.output['max'] = _h.max('time').rio.reproject_match(self.grid.mask)
-        # self.output['q9'] = _h.quantile(q=.9, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
+        self.get_indicators(res=res, study_area=study_area)
         
         pass
 
-    
     
 
 
@@ -1407,8 +1419,9 @@ class PMARmulti(PMAR):
         self.ppi_cache = PMARCache(ppi_output_dir)
              
         ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        
-        self.output = xr.Dataset()
+
+        if not self.output:
+            self.output = xr.Dataset()
         self.grid = make_grid(res=res, study_area=study_area)
         
         if ppi_exists == True:
@@ -1435,7 +1448,6 @@ class PMARmulti(PMAR):
             self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding)
             self.write_tiff(self.output['ppi'], path=ppi_path)
             self.ppi_path = ppi_path
-        
     
 
     def sum_seedings(self, rep_path):
@@ -1496,8 +1508,9 @@ class PMARmulti(PMAR):
         self.ppi_cache = PMARCache(ppi_output_dir)
              
         ppi_path, ppi_exists = self.ppi_cache.raster_cache(spatial_domain=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
-        
-        self.output = xr.Dataset()
+
+        if not self.output:
+            self.output = xr.Dataset()
         
         if ppi_exists == True:
             logger.info('PPI with requested configurations found in cache.')
@@ -1505,6 +1518,8 @@ class PMARmulti(PMAR):
         else:
             self.get_trajectories(pnum=pnum, start_time=start_time, seedings=seedings, tshift=tshift, end_time=end_time, duration_days=duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
             self.get_ppi(res=res, use=use, use_label=use_label, emission=emission, study_area=study_area, decay_coef=decay_coef)
+
+        self.get_indicators(res=res, study_area=study_area)
             
         pass
 
