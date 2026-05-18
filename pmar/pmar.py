@@ -532,6 +532,27 @@ class PMAR(object):
         
         pass
 
+    def import_trajectories(self, files_to_import): #, align_by = 'time'):
+        if type(files_to_import) is str:
+            self.particle_path = files_to_import
+            ds = xr.open_dataset(self.particle_path)
+            print('string')
+            
+        elif type(files_to_import) is list:
+            raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
+            
+        elif type(files_to_import) is xr.core.dataset.Dataset:
+            ds = files_to_import 
+            print('ds')
+
+        else:
+            raise ValueError('Type of files_to_import unrecognised. please provide path(s) to file(s) or xarray Dataset.')
+    
+        self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
+        # giving all traj unique id?
+        pass
+    
+
     def plot_trajectories(self, t=None, filename=None, s=None, c='age', cmap='viridis', alpha=None, proj=None):
         from pmar.plotting import plot_map
         import matplotlib.pyplot as plt
@@ -1411,6 +1432,35 @@ class PMARmulti(PMAR):
             self.particle_list.append(self.particle_path)
 
         self.import_trajectories(self.particle_list)
+
+
+    def import_trajectories(self, files_to_import): #, align_by = 'time'):
+        if type(files_to_import) is str:
+#            self.particle_path = files_to_import
+ #           ds = xr.open_dataset(self.particle_path)
+  #          print('string')
+            raise ValueError('Please use PMAR class to import a single trajectory file.')
+            
+        elif type(files_to_import) is list:
+            self.particle_list = files_to_import
+            self.seedings = len(self.particle_list)
+            
+            ds = xr.open_mfdataset(self.particle_list, parallel=True, combine='nested', join='outer', concat_dim='seeding') # this will give all seedings the same dimensions and pad them with nans
+            print('list')
+            
+        elif type(files_to_import) is xr.core.dataset.Dataset:
+            ds = files_to_import 
+            print('ds')
+        
+#        elif type(files_to_import) is list:
+ #           raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
+        else:
+            raise ValueError('Type of files_to_import unrecognised. please provide path(s) to file(s) or xarray Dataset.')
+    
+        self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
+        # giving all traj unique id?
+        pass
+        
 
     def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0): 
         
