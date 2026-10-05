@@ -4,6 +4,7 @@ import numpy as np
 import xarray as xr
 import pandas as pd
 import geopandas as gpd
+import shapely
 from datetime import datetime, timedelta, date
 from shapely.geometry import Point, Polygon
 from opendrift.models.oceandrift import OceanDrift
@@ -11,82 +12,94 @@ from opendrift.models.openoil import OpenOil
 from opendrift.models.plastdrift import PlastDrift
 from opendrift.models.chemicaldrift import ChemicalDrift
 from opendrift.models.larvalfish import LarvalFish
-#import copernicusmarine
 from opendrift.readers.reader_copernicusmarine import Reader
 from opendrift.readers.unstructured import shyfem
 from opendrift.readers.reader_netCDF_CF_generic import Reader as GenericReader
 import opendrift
-#from pydap.client import open_url
-#from pydap.cas.get_cookies import setup_session
 import time as T
 from xhistogram.xarray import histogram
 import os
 from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
-#import netrc
-#import random
-#import rasterio
-#import tempfile
-#from netCDF4 import Dataset
 from pathlib import Path
 #from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
 os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
 from rasterio.enums import Resampling
 #import glob
-#from copy import deepcopy
 #from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
 from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus
 #from cmap import Colormap
-#from pmar.plotting import plot_map
-from scipy.sparse import coo_array
-#tol_inc = Colormap('tol:incandescent').to_mpl()
-#tol_muted = Colormap('tol:muted').to_mpl()
-#rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
-#tol_div = Colormap('tol:BuRd').to_mpl()
-#from xgcm import Grid
-from scipy.sparse import diags
+from pmar.plotting import plot_map
+from scipy.sparse import coo_array, diags
 from scipy.sparse.linalg import matrix_power
 from scipy.io import mmwrite
 logger = logging.getLogger('pmar')
-#logger.setLevel(logging.DEBUG)
-# sh = logging.StreamHandler()
-# sf = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-# sh.setFormatter(sf)
-# logger.addHandler(sh)
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
         
         
-class PMAR(object): 
+class PMAR(object):
     """
-    Developed at CNR ISMAR in Venice.
+    Particle-based Modelling and Analysis for MARine Decision Support.
 
-    ...
+    Developed at CNR ISMAR in Venice. Drives OpenDrift (MET Norway) to simulate particle
+    trajectories representing a given tracer (generic, plastic, chemical, oil, metal or
+    larvae) released from a given source.
 
     Attributes
     ----------
-
+    ds : xr.Dataset or None
+        Imported particle trajectory data (lon, lat, z, age_seconds, origin_marker, ...).
+    o : opendrift.models.basemodel.OpenDriftSimulation or None
+        The active OpenDrift simulation object while a run is in progress.
+    grid : xr.Dataset or None
+        Regular spatial grid (cell edges/centers, bin indices) used for rasterization.
+    cm_grid : geopandas.GeoDataFrame or None
+        Vector (polygon) version of grid, used for connectivity matrix calculations.
+    CM / Pij : scipy.sparse array or None
+        Connectivity matrix between polygons in cm_grid.
+    output : xr.Dataset or None
+        Computed rasterized outputs (e.g. 'ppi', 'SUM', 'MAX', quantile indicators).
+    cache : pmar.cache.PMARCache
+        On-disk cache used to avoid recomputing trajectories/rasters for the same config.
+    basedir : pathlib.Path
+        Root output directory for this instance's simulation/cache/figure files.
 
     Methods
     -------
-
-
+    See method docstrings below for the full pipeline: get_trajectories/import_trajectories,
+    get_ppi/get_indicators, get_Pij/get_Nij/predict_with_CM, and run() as the top-level
+    single-seeding pipeline (get_trajectories -> get_ppi -> get_indicators).
     """
 
 
-    def __init__(self, spatial_domain='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10):
+    def __init__(self, spatial_domain='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10, log_to_file=False, _internal=False):
         """
+        Initialize a PMAR instance: set up output/cache directories, default state, logging,
+        the pressure/OpenDrift module, and the spatial domain/readers.
+
+        `_internal` is for internal use only (see PMARmulti.get_ppi/get_Pij's `temp_self`): when
+        True, this call skips (re)configuring the shared module logger entirely, so a nested
+        helper PMAR instance never clobbers the outer/real instance's log handlers or level.
+
         Parameters
-        ---------- 
+        ----------
         spatial_domain : str or list, optional
             If str, an ocean basin for which CMEMS readers are available. Otherwise, a list of paths of files to be imported as OpenDrift readers. Default is 'global'
+        readers : list, optional
+            Local reader datasets/paths to add to OpenDrift directly (added as-is via
+            o.add_reader), instead of readers derived from spatial_domain. Default is None.
+        reader_type : str, optional
+            Type of the local readers passed in `readers` (e.g. 'shyfem'). Currently unused
+            by get_trajectories, kept for future reader-type-specific handling. Default is None.
         pressure : str, optional
-
+            Type of pressure to simulate; one of 'generic', 'plastic', 'chemical', 'oil',
+            'metal', 'larvae'. Selects the OpenDrift module via set_pressure(). Default is 'generic'.
         chemical_compound : str, optional
             if pressure is 'chemical', a chemical_compound can be specified to be initialised in ChemicalDrift
         basedir : str, optional
@@ -94,7 +107,18 @@ class PMAR(object):
         localdatadir : str, optional
             path to directory where input data (ocean, atmospheric) is stored. Default is None
         particle_path : str, optional
-            path to netcdf file containing output of OpenDrift simulation. Default is None. If a particle_path is given in initialisation,    
+            path to netcdf file containing output of OpenDrift simulation. Default is None.
+            If a particle_path is given in initialisation, it is stored on self.particle_path
+            for later import (self.particle_path defaults to an empty list otherwise).
+        netrppi_path : str, optional
+            Currently unused (reserved). Default is None.
+        loglevel : int, optional
+            Logging level for the module logger (values below 10 are clamped to 10/NOTSET-safe).
+            Default is 10 (DEBUG).
+        log_to_file : bool, optional
+            If True (default), in addition to the console, also write logger output to a
+            timestamped text file in `basedir` (pmar_<timestamp>.log), at the same level as
+            the console. Set to False to log to the console only.
         """
 
 
@@ -136,19 +160,27 @@ class PMAR(object):
         self.seeding_radius = None
         self.start_time = None
         
-        # set up logger 
-        logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
-        datefmt = '%H:%M:%S'        
-        sh = logging.StreamHandler()
-        sf = logging.Formatter(logformat)
-        sh.setFormatter(sf)
+        # set up logger
+        if not _internal:
+            logformat = '%(asctime)s %(levelname)-7s %(name)s:%(lineno)d: %(message)s'
+            datefmt = '%H:%M:%S'
+            sf = logging.Formatter(logformat)
 
-        if (logger.hasHandlers()):
-            logger.handlers.clear()        
-        logger.addHandler(sh)
-        if loglevel < 10:  # 0 is NOTSET, giving no output
-            loglevel = 10
-        logger.setLevel(loglevel)
+            if (logger.hasHandlers()):
+                logger.handlers.clear()
+            sh = logging.StreamHandler()
+            sh.setFormatter(sf)
+            logger.addHandler(sh)
+
+            if log_to_file:
+                log_filename = f"pmar_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                fh = logging.FileHandler(self.basedir / log_filename)
+                fh.setFormatter(sf)
+                logger.addHandler(fh)
+
+            if loglevel < 10:  # 0 is NOTSET, giving no output
+                loglevel = 10
+            logger.setLevel(loglevel)
 
         self.set_pressure(pressure)
 
@@ -176,6 +208,16 @@ class PMAR(object):
 
 
     def set_pressure(self, pressure):
+        """
+        Select and store the OpenDrift simulation module for a given pressure type.
+
+        Parameters
+        ----------
+        pressure : str
+            One of 'generic', 'plastic', 'chemical', 'oil', 'metal', 'larvae'. Sets
+            self.pressure and self.opendrift_module (the OpenDrift model class to
+            instantiate in get_trajectories).
+        """
         pressures = {'generic': {'opendrift_module': OceanDrift},
                      'plastic': {'opendrift_module': PlastDrift},
                   #   'bacteria': {'opendrift_module': OceanDrift, 'termvel':0, 'decay_coef':1},
@@ -190,7 +232,24 @@ class PMAR(object):
 
     
     def _make_grid(self, res, study_area=None, crs='epsg:4326'):
-        
+        """
+        Build a regular rectangular xr.Dataset grid over study_area at resolution res.
+
+        Parameters
+        ----------
+        res : float
+            Cell size (in crs units, typically degrees).
+        study_area : list, optional
+            Spatial bounds [xmin, ymin, xmax, ymax]. Default is None, i.e. self.study_area.
+        crs : str, optional
+            CRS to write on the resulting grid. Default is 'epsg:4326'.
+
+        Returns
+        -------
+        xr.Dataset
+            Grid with cell edges (x_e, y_e), cell centers (x_c, y_c), cell size (dx, dy),
+            meshgrid coordinates (Xc, Yc), a ones array, and a per-cell index array (bin_n).
+        """
         if study_area is None:
             study_area = self.study_area
             
@@ -221,7 +280,27 @@ class PMAR(object):
         return grid
 
     
-    def import_trajectories(self, files_to_import): #, align_by = 'time'):
+    def import_trajectories(self, files_to_import, align_by_age=False): #, align_by = 'time'):
+        """
+        Load OpenDrift trajectory output into self.ds.
+
+        Parameters
+        ----------
+        files_to_import : str or list of str or xr.Dataset
+            A single path to an OpenDrift output netCDF file, a list of paths (opened and
+            concatenated along a new 'seeding' dimension via xr.open_mfdataset, padding
+            seedings of different lengths with NaNs), or an already-open xr.Dataset.
+        align_by_age : bool, optional
+            If True, roll each trajectory's time series (via the nested roll_by_release
+            helper) so its first valid timestep is at time index 0, then drop trailing NaNs.
+            Useful when trajectories were seeded at different times. Default is False.
+
+        Notes
+        -----
+        Sets self.ds to the ['lon', 'lat', 'z', 'age_seconds', 'origin_marker'] subset of the
+        opened dataset. When files_to_import is a list, also sets self.particle_list and
+        self.seedings.
+        """
         if type(files_to_import) is str:
             self.particle_path = files_to_import
             ds = xr.open_dataset(self.particle_path)
@@ -245,9 +324,60 @@ class PMAR(object):
     
         self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
         # giving all traj unique id?
+
+        if align_by_age == True:
+            logger.warning('rolling trajectories')
+            
+            def roll_by_release(da):
+                """
+                Roll a (trajectory, time) DataArray so that the first valid value
+                of each trajectory is at time index 0.
+                """
+            
+                # Index of first non-NaN value along time
+                shift = da.isnull().argmin("time").values
+            
+                nt = da.sizes["time"]
+            
+                idx = (np.arange(nt)[None, :] + shift[:, None]) % nt
+            
+                return xr.DataArray(
+                    np.take_along_axis(da.values, idx, axis=1),
+                    dims=da.dims,
+                    coords=da.coords,
+                    attrs=da.attrs,
+                    name=da.name,
+                )
+
+            for var in self.ds.data_vars:
+                self.ds[var] = roll_by_release(self.ds[var])
+            # drop tail of nans
+            self.ds = self.ds.dropna('time')
+            # add some tests to check it all went smoothly: age_seconds should be 0 for all trajectories at time 0 , e.g.
+            # np.unique(self.ds.age_seconds.isel(time=0)) == 0
+            
+            # swap dimensions time and age
+            #age = self.ds.age_seconds.isel(trajectory=0)
+            #self.ds = self.ds.assign_coords(age_seconds=("time", age.data))
+            #self.ds = self.ds.swap_dims({"time": "age_seconds"}).drop('time')
+            
         pass
 
     def import_ppi(self, files_to_import):
+        """
+        Load one or more previously-computed PPI raster file(s) as a DataArray.
+
+        Parameters
+        ----------
+        files_to_import : str or list of str
+            Path(s) to raster file(s) to open (via rasterio), concatenated along a new
+            'seeding' dimension if multiple are given. Also stored on self.ppi_list.
+
+        Returns
+        -------
+        xr.DataArray
+            The 'band_data' variable of the opened (and squeezed) dataset.
+        """
         r = xr.open_mfdataset(files_to_import, engine="rasterio", concat_dim='seeding', combine='nested').squeeze().band_data
 
         self.ppi_list = files_to_import
@@ -271,7 +401,7 @@ class PMAR(object):
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
          
     
-    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), duration_days=30, seeding_shapefile = None, seed_within_bounds=None, seed_from_file=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -284,9 +414,7 @@ class PMAR(object):
         
         Parameters
         ----------
-        spatial_domain : str
-            String defining the spatial_domain of the simulation i.e., the model data to be used for particle forcing. Options are 'med-cmems', 'bs-cmems' and 'bridge-bs'. 
-        pnum : int 
+        pnum : int
             The number of particles to be seeded
         start_time : str
             The start date of the simulation, in string format 'dd-mm-yyyy'
@@ -298,25 +426,26 @@ class PMAR(object):
             Path to a shapefile containing geometries to seed within. Default is None,  i.e. the whole basin is covered.
         seed_within_bounds : list, optional
             Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
+        seed_from_file : str, optional
+            Path to an OpenDrift output netcdf file to seed particles from (via seed_from_file()), e.g. to continue a previous simulation. Default is None.
         z : float, optional
-            Depth at which to seed particles [m]. Default is -0.5m. 
+            Depth at which to seed particles [m]. Default is -0.5m.
         tstep : timedelta, optional
-            Time step used for OpenDrift simulation. Default is 6 hours
+            Time step used for OpenDrift simulation. Default is 1 hour
         hdiff : float, optional
             Horizontal diffusivity of particles, in [m2/s]. Default is 10m2/s
         termvel : float, optional
             Terminal velocity representing buoyancy of particles, in [m/s]. Default is 0. Positive means rising up, negative sinking down
+        crs : str, optional
+            EPSG string for polygon. Default is 4326
         seeding_radius : float, optional
             Opendrift "radius".
         beaching : bool, optional
-
+            Whether particles reaching the coastline are allowed to beach ('stranding'). Default is False, i.e. particles that reach the coast do not get stuck ('previous').
         stokes_drift : bool, optional
-        
-        crs : str, optional
-            EPSG string for polygon. Default is 4326   
-        loglevel : int, optional
-            OpenDrift loglevel. Set to 0 (default) to retrieve all debug information.
-            Provide a higher value (e.g. 20) to receive less output.
+            Whether to include Stokes drift in the simulation. Default is False.
+        pnum_per_shape : bool, optional
+            If True, seed pnum particles within each individual shape of seeding_shapefile (via seed_from_geopandas()), rather than pnum particles distributed across the whole shapefile. Default is False.
         """
         
         t_0 = T.time()  
@@ -344,15 +473,12 @@ class PMAR(object):
             seeding_shapefile = str(q)
             logger.info(f'created seeding_shapefile with bounds {seed_within_bounds}')
 
-        if study_area is None:
-            study_area = self.spatial_domain['extent']
 
-        self.study_area = study_area
         self.seeding_shapefile = seeding_shapefile 
         self.seed_within_bounds = seed_within_bounds
-        logger.debug(f'study_area = {self.study_area}, seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
+        logger.debug(f'seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
 
-        file_path, file_exists = self.cache.particle_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
+        file_path, file_exists = self.cache.particle_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seed_from_file=seed_from_file, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
@@ -401,8 +527,8 @@ class PMAR(object):
             else:
                 self.o.set_config('general:coastline_action', 'previous') # behaviour at coastline. 'previous' means particles that reach the coast do not get stuck
             
-            self.o.set_config('drift:horizontal_diffusivity', hdiff)  # horizontal diffusivity
-            self.o.set_config('drift:advection_scheme', 'euler') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
+            self.o.set_config('environment:constant:horizontal_diffusivity', hdiff)  # horizontal diffusivity
+            self.o.set_config('drift:advection_scheme', 'runge-kutta4') # advection schemes (default is 'euler'). other options are 'runge-kutta', 'runge-kutta4'
             
             # ChemicalDrift configs - ## DO NOT CHANGE ORDER OF CONFIGS ## 
             if self.pressure in ['chemical', 'metal']:
@@ -444,25 +570,25 @@ class PMAR(object):
                 self.o.init_transfer_rates()
                                 
     
-            logger.info('adding landmask...')
+            #logger.info('adding landmask...')
             # landmask from cartopy (from "use shapefile as landmask" example on OpenDrift documentation)
-            shpfilename = shpreader.natural_earth(resolution='10m',
-                                    category='cultural',
-                                    name='admin_0_countries')
-            reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
+            #shpfilename = shpreader.natural_earth(resolution='10m',
+             #                       category='cultural',
+              #                      name='admin_0_countries')
+            #reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
             
-            self.o.add_reader([reader_landmask])
-            self.o.set_config('general:use_auto_landmask', False)  # Disabling the automatic GSHHG landmask
+            #self.o.add_reader([reader_landmask])
+            self.o.set_config('general:use_auto_landmask', True)  # Disabling the automatic GSHHG landmask
             
             logger.info('adding readers...')            
             
             if self.readers:
                 # add local datasets as readers. added for sl application
                 for id,r in enumerate(self.readers):
-                    # if self.reader_type == 'shyfem':
-                    #     reader = shyfem.Reader(r)
-                    # else:
-                    #     reader = GenericReader(r, name=f'cmems_{id}')
+                    #if self.reader_type == 'shyfem':
+                      #  reader = shyfem.Reader(r)
+                    #else:
+                     #   reader = GenericReader(r, name=f'cmems_{id}')
                     self.o.add_reader(r)#, variables=['x_sea_water_velocity', 'y_sea_water_velocity'])
     
             else:
@@ -490,14 +616,16 @@ class PMAR(object):
             self.o.set_config('drift:vertical_mixing', True)  
     
             # TODO 
-            if pnum_per_shape is True:
+            if seed_from_file is not None:
+                self.o.seed_from_file(seed_from_file)
+            elif pnum_per_shape is True:
                 seeding_polygon = gpd.read_file(self.seeding_shapefile)
                 for shape in range(len(seeding_polygon)):
-                    self.o.seed_from_geopandas(geodataframe=seeding_polygon.iloc[[shape]], number=pnum, time=[start_time, start_time + seed_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id)
+                    self.o.seed_from_geopandas(geodataframe=seeding_polygon.iloc[[shape]], number=pnum, time=[start_time - seed_time, start_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id)
             else:
-                self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=[start_time, start_time + seed_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
+                self.o.seed_from_shapefile(shapefile=self.seeding_shapefile, number=pnum, time=[start_time - seed_time, start_time], terminal_velocity=termvel, z=z, origin_marker=self.seeding_id, radius=seeding_radius)
     
-    
+            
             logger.info('running opendrift...')
             now = datetime.now()
             current_time = now.strftime("%H:%M:%S")
@@ -532,28 +660,61 @@ class PMAR(object):
         
         pass
 
-    def import_trajectories(self, files_to_import): #, align_by = 'time'):
-        if type(files_to_import) is str:
-            self.particle_path = files_to_import
-            ds = xr.open_dataset(self.particle_path)
-            print('string')
-            
-        elif type(files_to_import) is list:
-            raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
-            
-        elif type(files_to_import) is xr.core.dataset.Dataset:
-            ds = files_to_import 
-            print('ds')
+    def _continue_trajectories(self, seed_from_file, duration_days):
+        '''
+        Continue a previous OpenDrift run by re-seeding particles from its output file.
 
+        Recovers pnum, start_time, tstep, termvel and beaching config from the attrs/data of
+        an existing OpenDrift output file, then calls get_trajectories(seed_from_file=...) to
+        extend the simulation for a further duration_days. USE WITH CAUTION: only the settings
+        recovered here are reused; other get_trajectories parameters fall back to defaults.
+
+        Parameters
+        ----------
+        seed_from_file : str
+            Path to an existing OpenDrift output netCDF file to resume from.
+        duration_days : int
+            Additional duration, in days, to run the continued simulation for.
+
+        Returns
+        -------
+        The return value of get_trajectories() (None; trajectories are stored on self.ds).
+        '''
+        ds = xr.open_dataset(seed_from_file)
+        pnum = len(ds.trajectory)
+        start_time = str(ds.time.max().data)[:10]
+        tstep = pd.to_timedelta(ds.time_step_calculation).to_pytimedelta()
+        termvel = ds.attrs['config_seed:terminal_velocity']
+        if ds.attrs['config_general:coastline_action'] == 'stranding':
+            beaching = True
         else:
-            raise ValueError('Type of files_to_import unrecognised. please provide path(s) to file(s) or xarray Dataset.')
-    
-        self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
-        # giving all traj unique id?
-        pass
-    
+            beaching = False
+        return self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration_days, termvel=termvel, beaching=beaching, seed_from_file=seed_from_file, hdiff=10)
 
-    def plot_trajectories(self, t=None, filename=None, s=None, c='age', cmap='viridis', alpha=None, proj=None):
+    
+    def plot_trajectories(self, t=None, filename=None, s=1, c='age', cmap='viridis', alpha=None, proj=None):
+        """
+        Scatter-plot particle positions from self.ds on a map.
+
+        Parameters
+        ----------
+        t : int or slice, optional
+            Timestep index (or slice) to plot. Default is None, i.e. a subsampled range of
+            timesteps (and, for large datasets, trajectories) is plotted for readability.
+        filename : str, optional
+            Path to save the figure to. Default is None (figure is not saved).
+        s : float, optional
+            Marker size for the scatter plot. Default is 1.
+        c : {'age', 'z', 'marker'}, optional
+            What to color points by: elapsed time in days ('age'), depth ('z'), or
+            origin_marker ('marker'). Default is 'age'.
+        cmap : str, optional
+            Colormap; overridden internally based on `c`. Default is 'viridis'.
+        alpha : float, optional
+            Marker transparency. Default is None.
+        proj : cartopy.crs.Projection, optional
+            Map projection. Default is None, i.e. cartopy.crs.PlateCarree().
+        """
         from pmar.plotting import plot_map
         import matplotlib.pyplot as plt
         import cartopy
@@ -672,16 +833,42 @@ class PMAR(object):
 
 
     def normalize_weight(self, weight, res, study_area=None):
+        """
+        Normalize each trajectory's weight by dividing it by the number of particles that were
+        seeded within the same spatial bin at the first timestep (t=0).
+
+        This corrects for uneven seeding density in space, so that weight differences between
+        bins reflect trajectory behaviour (e.g. use, emission, decay) rather than simply how
+        many particles happened to start in that bin.
+
+        Parameters
+        ----------
+        weight : xr.DataArray
+            Per-trajectory weight to be normalized, with dimensions matching self.ds (e.g.
+            'trajectory', 'time').
+        res : float
+            Cell size, i.e. the resolution of the grid used to bin trajectories at t=0. Passed
+            to get_bin_n().
+        study_area : optional
+            Spatial extent used to build the grid. Default is None, i.e. the whole domain.
+
+        Returns
+        -------
+        xr.DataArray
+            weight divided by the number of particles seeded in the same bin at t=0, grouped
+            by bin_n_t0.
+        """
         # dividing each trajectory weight by the number of particles that were in the same bin at t0
-        
+
         bin_n_t0 = self.get_bin_n(res=res, t=0, study_area=study_area)
         self.ds['bin_n_t0'] = bin_n_t0
 
-        weight_by_bin = weight.groupby(self.ds.bin_n_t0.load()) # added load otherwise groupby raises error
-        counts_per_bin = bin_n_t0.groupby(self.ds.bin_n_t0).count()
-        
+        _, inverse, counts = np.unique(bin_n_t0.values, return_inverse=True, return_counts=True)
+        counts_per_bin = bin_n_t0.copy(data=counts[inverse])
+
         logger.info('counts_per_bin...')
-        normalized_weight = weight_by_bin/counts_per_bin 
+        normalized_weight = weight / counts_per_bin
+        normalized_weight = normalized_weight.assign_coords(bin_n_t0=self.ds['bin_n_t0'])
 
         return normalized_weight
 
@@ -750,12 +937,27 @@ class PMAR(object):
 
     def get_bin_n(self, res, t=None, study_area=None, ds=None):
         '''
-        Add new variable to ds ('bin_n_t0') containing its "bin number" at timestep t, i.e. a unique identifier corresponding to a specific spatial grid-cell. 
-        
+        Look up each trajectory's grid-cell "bin number" at timestep t, i.e. a unique
+        identifier corresponding to a specific spatial grid-cell, via nearest-neighbor
+        lookup of (lon, lat) into self.grid.bin_n.
+
         Parameters
         ----------
-        t : int
-            index of timestep to consider
+        res : float
+            Currently unused directly (grid resolution is taken from self.grid); kept for
+            API consistency with sibling methods.
+        t : int, optional
+            Index of timestep to consider. Default is None, i.e. bin numbers are computed
+            for every timestep.
+        study_area : optional
+            Currently unused directly; kept for API consistency with sibling methods.
+        ds : xr.Dataset, optional
+            Trajectory dataset to look up positions from. Default is None, i.e. self.ds.
+
+        Returns
+        -------
+        xr.DataArray
+            Bin number(s) matching the trajectory (and, if t is None, time) dimensions of ds.
         '''
 
         # if i opened multiple seedings with mfdataset, this does not work, because most particles are inactive at the first timestep. 
@@ -775,18 +977,38 @@ class PMAR(object):
         
         return bin_n
 
-    def get_histogram(self, res, study_area=None, weighted=True, dim=['trajectory', 'time'], block_size='auto'):
+    def get_histogram(self, res, study_area=None, weighted=True, dim=['trajectory', 'time'], t=None, block_size='auto'):
         '''
-        "Density trend (DT). The particle DT reflects the number of particles that have visited each grid cell during a certain time interval."
-        from Stanev et al., 2019
-        
-        res : float
-            cell size, aka desired resolution of output map
-        weighted : bool, optional
-            whether the histogram should be weighted or not
+        Compute a 2D (lon, lat) histogram of particle positions on a grid of resolution res.
+
+        "Density trend (DT). The particle DT reflects the number of particles that have
+        visited each grid cell during a certain time interval." (Stanev et al., 2019)
+
         Parameters
         ----------
-        
+        res : float
+            Cell size, aka desired resolution of output map. Used to (re)build self.grid.
+        study_area : list, optional
+            Spatial bounds [xmin, ymin, xmax, ymax] for the grid. Default is None, i.e.
+            self.study_area.
+        weighted : bool, optional
+            Whether to weight the histogram by self.ds.weight (NaNs filled with 0). If
+            False, an unweighted (count) histogram is computed. Default is True.
+        dim : list of str, optional
+            Dimensions of self.ds to reduce over when binning. Default is
+            ['trajectory', 'time'] (i.e. sum over both).
+        t : int, optional
+            If given, restrict to this single timestep index before binning (and dim is
+            forced to None). Default is None, i.e. all timesteps are used.
+        block_size : optional
+            Passed through to xhistogram.xarray.histogram for chunked computation. Default
+            is 'auto'.
+
+        Returns
+        -------
+        xr.DataArray
+            Histogram of particle counts (or weighted sums) per grid cell, with dims
+            renamed to ('x', 'y') and CRS/nodata written.
         '''
 
 #        if self.seedings > 1:
@@ -804,12 +1026,22 @@ class PMAR(object):
         # weights = self.set_weights(res=res, study_area=study_area, weight=weight, normalize=normalize, use=use, emission=emission, decay_coef=decay_coef, assign=assign)
         # logger.info('set_weights done.')
         
+
+
+        if t is not None:
+            ds = self.ds.isel(time=t)
+            dim = None #['trajectory','time']
+            print(f'calculating histogram at time {t}')
+        else:
+            ds = self.ds 
+        
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
         if weighted == False:
             weights = None
         else:
-            weights = self.ds.weight.fillna(0.)
-        h = histogram(self.ds.lon, self.ds.lat, bins=[xbin, ybin], dim=dim, weights=weights, block_size=block_size) 
+            weights = ds.weight.fillna(0.)
+        
+        h = histogram(ds.lon, ds.lat, bins=[xbin, ybin], dim=dim, weights=weights, block_size=block_size) 
         # block_size='auto' was giving division by 0 error, which is a known bug: https://github.com/xgcm/xhistogram/issues/16
         #NOTE: NaNs in weights will make the weighted sum as nan. To avoid this, call .fillna(0.) on your weights input data before calling histogram().
             
@@ -824,6 +1056,25 @@ class PMAR(object):
         return r    
 
     def get_indicators(self, res, study_area, quantile=.9):
+        """
+        Compute summary indicator rasters (SUM, MAX, and a quantile) from the per-timestep
+        trajectory histogram, and store them in self.output.
+
+        Parameters
+        ----------
+        res : float
+            Resolution used to bin trajectories (passed to get_histogram).
+        study_area : list
+            Spatial bounds [xmin, ymin, xmax, ymax] for the grid.
+        quantile : float, optional
+            Quantile (over time) to compute in addition to SUM/MAX. Default is 0.9, stored
+            as self.output['Q90'].
+
+        Notes
+        -----
+        Sets self.output['SUM'], self.output['MAX'], and self.output[f'Q{quantile*100}'],
+        each reprojected to match self.grid.mask.
+        """
         # other indicators
         if hasattr(self.ds, 'weight'):
             weighted = True
@@ -878,7 +1129,7 @@ class PMAR(object):
             
             r = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time)).rio.reproject_match(self.grid.mask) #.assign_attrs({'use_path': use_path, 'emission':emission})
     
-            ppi = r / len(self.ds.time)
+            ppi = r / len(self.ds.time) # divide by number of timesteps so that it is independent of temporal resolution (timestep)
                 
             self.output['ppi'] = ppi.rio.reproject_match(self.grid.mask)#.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
 
@@ -889,6 +1140,19 @@ class PMAR(object):
         pass
 
     def plot_ppi(self, proj=None, cmap=None, filename=None):
+        """
+        Plot self.output.ppi (masked to values > 0) on a map.
+
+        Parameters
+        ----------
+        proj : cartopy.crs.Projection, optional
+            Map projection. Default is None, i.e. cartopy.crs.epsg(4326).
+        cmap : str, optional
+            Colormap for the PPI raster. Default is None (matplotlib default).
+        filename : str, optional
+            If given, filename (relative to self.basedir/figures) to save the figure to.
+            Default is None (figure is not saved).
+        """
         from pmar.plotting import plot_map
         import cartopy
         if proj is None:
@@ -902,13 +1166,14 @@ class PMAR(object):
         fig, ax = plot_map(proj=proj, filename=filename)
         self.output.ppi.where(self.output.ppi>0).plot(ax=ax, cmap=cmap, transform=transform)
 
-    # this does not include weights
-    def _get_CM(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=None):#, apply_landmask=False):
-        
+    def get_particles_by_cell(self, t, ds=None, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None):
+        """
+        Create dictionary ll containing, for each polygon in cm_grid, the list of particles located in that polygon at time t.
+        """
         if study_area is None:
             study_area = self.study_area
             
-        ds = self.ds.isel(time=[t0,t1]) 
+        # create "cm_grid"
         if cm_grid is None: # if no polygons are given, consider entire grid
             if res is not None: # if a new resolution is given, create new grid
                 grid = make_grid(res=res, study_area=study_area)
@@ -918,70 +1183,7 @@ class PMAR(object):
             #cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c) 
             cm_grid = make_vector_grid(grid.bin_n.astype(float))
 
-        
-        p_df = ds[['lon','lat']].to_dataframe().reset_index()
-        p_gdf = gpd.GeoDataFrame(
-                                p_df,
-                                geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
-                                crs=cm_grid.crs
-                                )
-        
-        ll = {0:{},1:{}}
-
-        for t in range(2):
-            for i, polys in enumerate(cm_grid.geometry):
-                poly = cm_grid.geometry.iloc[i]
-                is_in_poly = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].set_index('trajectory').geometry.within(poly)
-                traj_in_poly = list(is_in_poly[is_in_poly].index)
-                ll[t][i] = traj_in_poly
-        
-        _Nij_sparse = []
-        _Pij_sparse = []
-        _Pji_sparse = []
-        row = []
-        col = []
-        
-        for i in range(len(cm_grid)):
-            for j in range(len(cm_grid)):
-                N = len(set(ll[0][i]).intersection(ll[1][j]))
-                if N > 0:
-                    _Nij_sparse.append(N)
-                    _Pij_sparse.append(N / len(ll[0][i]))
-                    _Pji_sparse.append(N / len(ll[1][j]))
-                    row.append(i)
-                    col.append(j)
-        
-        Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
-        Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
-        Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid)))).T
-        
-        self.cm_grid = cm_grid 
-        self.CM = Pij_sparse
-
-        if filename is not None:
-            mmwrite(filename, Pij_sparse)
-        
-        return Nij_sparse, Pij_sparse, Pji_sparse
-
-
-
-    def _get_Nij(self, cm_grid=None, res=None, study_area=None, weighted=False, t0=0, t1=-1, buffer=None):
-        
-        if study_area is None:
-            study_area = self.study_area
-            
-        ds = self.ds.ffill('time').isel(time=[t0,t1]) # V IMPORTANT, otherwise i miss beached particles and sum of CM rows is never equal to 1 , whereas bfill is needed for datasets with continuous seeding
-        
-        
-        if cm_grid is None: # if no polygons are given, consider entire grid
-            if res is not None: # if a new resolution is given, create new grid
-                grid = make_grid(res=res, study_area=study_area)
-                self.grid = grid
-            else: # otherwise consider existing grid defined in .run()
-                grid = self.grid
-            #cm_grid = _make_poly(lon=grid.x_c, lat=grid.y_c) 
-            cm_grid = make_vector_grid(grid.bin_n.astype(float))
-        
+        # add buffer 
         if buffer is not None:
             buff = cm_grid.dissolve().buffer(buffer)
             diff = gpd.GeoDataFrame({cm_grid.columns.drop('geometry')[0]: -1234, 'geometry': buff.difference(cm_grid.dissolve())}, crs=cm_grid.crs)
@@ -989,59 +1191,231 @@ class PMAR(object):
         
         self.cm_grid = cm_grid
 
+        if ds is None:
+            ds = self.ds
+        
+        ll = {}
+        # select which columns to include in geodataframe (whether only lat, lon or also weight)
         df_cols = ['lon','lat']
         if 'weighted' == True:
-            if 'weight' in self.ds.data_vars:
+            if 'weight' in ds.data_vars:
                 cols.append('weight')
             else:
                 raise ValueError('no weight variable found in ds')
-            
-        p_df = ds[df_cols].to_dataframe().reset_index()
-        p_gdf = gpd.GeoDataFrame(
-                                p_df,
-                                geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
-                                crs=cm_grid.crs
-                                )
-        
-        ll = {0:{},1:{}}
-        # ll contains for each time (0,1), and for each polygon in cm_grid, the ids of the trajectories contained in it
 
-        for t in range(2):
-            for i, polys in enumerate(cm_grid.geometry):
-                poly = cm_grid.geometry.iloc[i]
-                is_in_poly = p_gdf.sort_values(['time','trajectory'])[0+t*len(ds.trajectory):len(ds.trajectory)+t*len(ds.trajectory)].set_index('trajectory').geometry.within(poly)
-                traj_in_poly = list(is_in_poly[is_in_poly].index)
-                if 'weight' in p_gdf.columns:
-                    ll[t][i] = dict(zip(traj_in_poly, list(p_gdf.iloc[traj_in_poly]['weight'])))
-                else:
-                    ll[t][i] = traj_in_poly
+        # # create geodataframe with particle positions at time t
+        # p_df = ds.isel(time=t)[df_cols].to_dataframe().reset_index()
+        # p_gdf = gpd.GeoDataFrame(
+        #                         p_df,
+        #                         geometry=gpd.points_from_xy(p_df.lon, p_df.lat),
+        #                         crs=cm_grid.crs
+        #                         )
 
+        # create shapely points
+        points = shapely.points(ds.lon.isel(time=t).values.ravel(),
+                        ds.lat.isel(time=t).values.ravel())
+
+
+        # create dictionary ll containing list of trajectory ids present in each polygon at time t
+        # uses a spatial index (STRtree) to do the point-in-polygon assignment in one vectorized
+        # query instead of looping shapely.within(points, poly) once per cell (O(n_cells x n_traj))
+        n_cells = len(cm_grid)
+        tree = shapely.STRtree(cm_grid.geometry.values)
+        point_idx, cell_idx = tree.query(points, predicate='within')
+        order = np.argsort(cell_idx, kind='stable')
+        cell_idx_sorted = cell_idx[order]
+        point_idx_sorted = point_idx[order]
+        unique_cells, starts = np.unique(cell_idx_sorted, return_index=True)
+        groups = np.split(point_idx_sorted, starts[1:])
+        ll = {i: np.array([], dtype=int) for i in range(n_cells)}
+        for c, g in zip(unique_cells, groups):
+            ll[int(c)] = g
         return ll
+
+    def _ll_to_indicator(self, ll, n_cells, n_traj):
+        """
+        Build a sparse (n_cells x n_traj) 0/1 matrix from a get_particles_by_cell-style {cell: trajectory_ids} dict,
+        so that pairwise trajectory co-occurrence counts between two such dicts can be computed with
+        a single sparse matrix multiply (A0 @ A1.T) instead of an O(n_cells^2) loop with set intersections.
+        """
+        if ll:
+            rows = np.concatenate([np.full(len(ids), i) for i, ids in ll.items()])
+            cols = np.concatenate([np.asarray(ids) for ids in ll.values()])
+        else:
+            rows = cols = np.array([], dtype=int)
+        data = np.ones(len(rows))
+        return coo_array((data, (rows, cols)), shape=(n_cells, n_traj)).tocsr()
+
+    def get_Nij(self, t, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None):
+        """
+        Calculate sparse adjacency matrix Nij from particle positions at t=0 and t=t.
+
+        Returns
+        -------
+        Nij_sparse : scipy.sparse array
+            Adjacency matrix of particle counts from cell i at t=0 to cell j at t.
+        Ni0 : numpy.ndarray
+            Number of particles actually found in each cell i at t=0 (A0.sum(1)). Exposed
+            so get_Pij can normalize rows by the true departing cohort of each cell rather
+            than by Nij's own row-sum, which undercounts whenever particles leave cm_grid
+            entirely by time t and are therefore absent from every destination column.
+        """
+        ll0 = self.get_particles_by_cell(t=0, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+        ll1 = self.get_particles_by_cell(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+
+        n_cells = len(self.cm_grid) # needs to be self.cm_grid otherwise it does not take buffer
+        n_traj = self.ds.sizes['trajectory']
+        A0 = self._ll_to_indicator(ll0, n_cells, n_traj)
+        A1 = self._ll_to_indicator(ll1, n_cells, n_traj)
+        Nij_sparse = coo_array(A0 @ A1.T)
+        Ni0 = np.asarray(A0.sum(1)).ravel()
+        return Nij_sparse, Ni0
+
+    def get_Pij(self, t=-1, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
+        """
+        Calculate Markov transition matrix Pij by normalizing each row i of adjacency matrix Nij
+        by Ni, i.e. the actual number of particles found in cell i at t=0.
+        Entries of this matrix contain the probability of going from cell i to cell j after exactly t timesteps from t0.
+        Rows only sum to 1 if every particle found in cell i at t=0 is still found somewhere in
+        cm_grid (domain + buffer, if used) at time t; particles that leave cm_grid entirely by
+        time t are not found in any destination cell, so they correctly show up as a row sum < 1
+        (leaked probability mass) rather than being silently dropped from the normalization.
+        If buffer is given, the buffer cell (last row of cm_grid, appended by get_particles_by_cell) is forced
+        into an absorbing state: P(buffer -> buffer) = 1 and P(buffer -> j) = 0 for every other
+        cell j, so particles that leak out of the tracked domain into the buffer are considered
+        permanently gone from the system rather than being able to transition back.
+        """
+        # Nij = self.get_Nij(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+        # Ni = np.asarray(Nij.sum(1)).ravel() # normalized by Nij's own row-sum: undercounts particles lost from tracking by time t
+        Nij, Ni = self.get_Nij(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+        Pij = np.zeros_like(Ni, dtype=float)
+        # mask to avoid division by 0
+        mask = Ni != 0
+        # divide Nij by Ni, i.e. number of particles coming from cell i
+        Pij[mask] = 1.0 / Ni[mask]
+        Pij_sparse = diags(Pij) @ Nij # matrix multipli Nij with diagonal matrix with reciprocal of Ni
+
+        if buffer is not None:
+            # buffer cell is always the last row of cm_grid (see get_particles_by_cell); make it absorbing
+            buffer_idx = Pij_sparse.shape[0] - 1
+            Pij_sparse = Pij_sparse.tolil()
+            Pij_sparse[buffer_idx, :] = 0
+            Pij_sparse[buffer_idx, buffer_idx] = 1
+            Pij_sparse = Pij_sparse.tocsr()
+
+        self.Pij = Pij_sparse
+        if filename is not None:
+            mmwrite(filename, Pij_sparse)
+            logger.info(f'wrote file {filename}')
+
+        self.CM = Pij_sparse
+        return Pij_sparse
+
+    def get_Pij_within_range(self, t_max, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
+        """
+        Calculate Lagrangian connectivity matrix containing the probability of passing through cell j from cell i within t_max timesteps, starting from t=0.
+
+        If buffer is given, the buffer cell (last row of cm_grid, appended by get_particles_by_cell) is forced
+        into an absorbing state: P(buffer -> buffer) = 1 and P(buffer -> j) = 0 for every other
+        cell j, so particles that leak out of the tracked domain into the buffer are considered
+        permanently gone from the system rather than being able to transition back.
+        """
+        # generate list of trajectories in each polygon at time 0 ll0
+        ll0 = self.get_particles_by_cell(0, res=res, study_area=study_area, cm_grid=cm_grid, buffer=buffer, weighted=weighted)
+        # generate list of trajectories in each polygon at all other timesteps llt
+        for t in range(1, t_max):
+            _llt = self.get_particles_by_cell(t, res=res, study_area=study_area, cm_grid=cm_grid, buffer=buffer, weighted=weighted)
+            if t == 1:
+                llt = _llt
+            else:
+                llt = {k: list(set(llt[k]) | set(_llt[k])) for k in range(len(self.cm_grid))} # union
+
+        # count the intersection between ll0 and llt for each polygon pair, and divide it by ll0 in the source polygon (number of particles starting from that polygon)
+        n_cells = len(self.cm_grid)
+        n_traj = self.ds.sizes['trajectory']
+        A0 = self._ll_to_indicator(ll0, n_cells, n_traj)
+        At = self._ll_to_indicator(llt, n_cells, n_traj)
+        Nij = A0 @ At.T
+        Ni0 = np.asarray(A0.sum(1)).ravel()
+        Pij = np.zeros_like(Ni0, dtype=float)
+        mask = Ni0 != 0
+        Pij[mask] = 1.0 / Ni0[mask]
+        Pij_sparse = coo_array(diags(Pij) @ Nij)
+
+        if buffer is not None:
+            # buffer cell is always the last row of cm_grid (see get_particles_by_cell); make it absorbing
+            buffer_idx = Pij_sparse.shape[0] - 1
+            Pij_sparse = Pij_sparse.tolil()
+            Pij_sparse[buffer_idx, :] = 0
+            Pij_sparse[buffer_idx, buffer_idx] = 1
+            Pij_sparse = coo_array(Pij_sparse)
+
+        if filename is not None:
+            mmwrite(filename, Pij_sparse)
+            logger.info(f'wrote file {filename}')
+
+        return Pij_sparse
+
+
     
-    def get_Pij(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filename=None, weighted=False):        
+    def _get_Pij(self, t=-1, cm_grid=None, res=None, study_area=None, buffer=None, filename=None, weighted=False):
+        """
+        Legacy/alternate implementation of get_Pij: calculate the Markov transition matrix
+        Pij by normalizing the adjacency matrix Nij (co-occurrence of trajectories in cell i
+        at t=0 and cell j at t) by Ni, the number of particles coming from cell i.
 
-        ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1, buffer=buffer, weighted=weighted)
-        # _Nij_sparse = []
-        _Pij_sparse = []
-        # _Pji_sparse = []
-        row = []
-        col = []
+        Parameters
+        ----------
+        t : int, optional
+            Timestep index (relative to t=0) to compute transitions to. Default is -1.
+        cm_grid : geopandas.GeoDataFrame, optional
+            Polygon grid to use; default is None, i.e. built from self.grid via get_particles_by_cell.
+        res : float, optional
+            Resolution for building a new grid, if cm_grid is None. Default is None.
+        study_area : list, optional
+            Spatial bounds for the grid. Default is None, i.e. self.study_area.
+        buffer : float, optional
+            Buffer distance added around cm_grid as an extra "outside" node. Default is None.
+        filename : str, optional
+            If given, path to write the resulting sparse matrix to (Matrix Market format).
+            Default is None.
+        weighted : bool, optional
+            Currently unused directly in this method body; kept for API consistency with
+            get_particles_by_cell. Default is False.
 
-        for i in range(len(self.cm_grid)):
-            for j in range(len(self.cm_grid)):
-                N = len(set(ll[0][i]).intersection(ll[1][j]))
-                if N > 0:
-                    # _Nij_sparse.append(N)
-                    _Pij_sparse.append(N / len(ll[0][i]))
-                    # _Pji_sparse.append(N / len(ll[1][j]))
-                    row.append(i)
-                    col.append(j)
-        
-        # Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
-        Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(self.cm_grid), len(self.cm_grid))))
-        # Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid)))).T
-        
-        #self.cm_grid = cm_grid 
+        Returns
+        -------
+        scipy.sparse array
+            The transition matrix Pij_sparse (also stored on self.CM). If buffer is given,
+            the buffer cell (last row of cm_grid, appended by get_particles_by_cell) is forced into an
+            absorbing state: P(buffer -> buffer) = 1 and P(buffer -> j) = 0 for every other
+            cell j, so particles that leak out of the tracked domain into the buffer are
+            considered permanently gone from the system rather than being able to transition
+            back.
+        """
+        ll0 = self.get_particles_by_cell(t=0, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+        ll1 = self.get_particles_by_cell(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
+
+        n_cells = len(self.cm_grid)
+        n_traj = self.ds.sizes['trajectory']
+        A0 = self._ll_to_indicator(ll0, n_cells, n_traj)
+        A1 = self._ll_to_indicator(ll1, n_cells, n_traj)
+        Nij = A0 @ A1.T
+        Ni0 = np.asarray(A0.sum(1)).ravel()
+        Pij = np.zeros_like(Ni0, dtype=float)
+        mask = Ni0 != 0
+        Pij[mask] = 1.0 / Ni0[mask]
+        Pij_sparse = coo_array(diags(Pij) @ Nij)
+
+        if buffer is not None:
+            # buffer cell is always the last row of cm_grid (see get_particles_by_cell); make it absorbing
+            buffer_idx = Pij_sparse.shape[0] - 1
+            Pij_sparse = Pij_sparse.tolil()
+            Pij_sparse[buffer_idx, :] = 0
+            Pij_sparse[buffer_idx, buffer_idx] = 1
+            Pij_sparse = coo_array(Pij_sparse)
+
+        #self.cm_grid = cm_grid
         self.CM = Pij_sparse
 
         if filename is not None:
@@ -1050,8 +1424,33 @@ class PMAR(object):
         
         return Pij_sparse
 
-    def get_Pji(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=True):        
+    # to update
+    def get_Pji(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=True):
+        """
+        Calculate reverse transition probabilities Pji: the probability that a particle
+        found in cell j at t1 originated from cell i at t0, for each pair of cells.
 
+        Parameters
+        ----------
+        cm_grid : geopandas.GeoDataFrame, optional
+            Polygon grid to use. Default is None.
+        res : float, optional
+            Resolution for building a new grid, if cm_grid is None. Default is None.
+        study_area : list, optional
+            Spatial bounds for the grid. Default is None, i.e. self.study_area.
+        t0 : int, optional
+            Origin timestep index. Default is 0.
+        t1 : int, optional
+            Destination timestep index. Default is -1.
+        filename : str or bool, optional
+            If given (and not None), path to write the resulting sparse matrix to (Matrix
+            Market format). Default is True.
+
+        Returns
+        -------
+        scipy.sparse array
+            The reverse transition matrix Pji_sparse.
+        """
         ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1)
         # _Nij_sparse = []
         # _Pij_sparse = []
@@ -1083,19 +1482,41 @@ class PMAR(object):
     
 
     def plot_CM(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap='Greys', mask=None):
+        """
+        Plot self.CM (densified) as a matrix heatmap.
+
+        Parameters
+        ----------
+        tick_labels : list, optional
+            Labels for matrix rows/columns (e.g. from cm_grid). Default is None.
+        figsize : list, optional
+            Figure size [width, height]. Default is [8, 6].
+        annot : bool, optional
+            Whether to annotate cells with their (rounded) values. Default is False.
+        linewidths : float, optional
+            Width of lines between cells. Default is 0.
+        vmin, vmax : float, optional
+            Color scale bounds. Default is 0 and None.
+        norm : optional
+            Matplotlib color normalization. Default is None.
+        cmap : str, optional
+            Colormap. Default is 'Greys'.
+        mask : float, optional
+            If given, cells with value <= mask are masked out of the plot. Default is None.
+        """
         # use cm_grid for tick_labels
-        from pmar.plotting import plot_array
+        from pmar.plotting import plot_matrix
         import matplotlib.pyplot as plt
-        CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array 
-        
+        CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array
+
         if mask is not None:
             mask = CM<=mask
 
         if annot == True:
             CM = np.round(CM,2)
-            
+
         fig, ax = plt.subplots(figsize=figsize)
-        plot_array(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask, ax=ax)
+        plot_matrix(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask, ax=ax)
 
     def dispersal_distance(self, CM=None, cm_grid=None):
         '''
@@ -1169,52 +1590,42 @@ class PMAR(object):
                     ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
 
         return cm_grid[f'destination_of_{origin_idx}']
-        
-    
-    def _predict_with_CM_np(self, initial_condition, CM=None):
-    # only works when CM is a grid covering the whole domain.
-    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
-        if CM is None:
-            CM = self.CM
-
-        _cm_prediction = np.matmul(initial_condition.ravel(), CM).reshape(initial_condition.shape)
-
-        cm_prediction = (xr.DataArray(_cm_prediction,
-                                      coords=dict(y_c=self.grid.y_c, x_c=self.grid.x_c, ))
-                         .rio.write_crs('epsg:4326'))
-        
-        self.cm_prediction = cm_prediction
-        
-        return cm_prediction
-        
-    def _predict_with_CM_xr(self, initial_condition, initial_condition_crs='epsg:4326', CM=None):
-    # only works when CM is a grid covering the whole domain.
-    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
-        if CM is None:
-            CM = self.CM.toarray() # my CM is now by default a sparse array, turn it into the full array to make predictions
-
-        initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject('epsg:4326').sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
-        
-        if initial_condition.data.ravel().shape[0] != CM.shape[0]:
-            logger.warning('initial_condition and CM dimensions do not match. clipping initial_condition to match cm_grid.')
-            initial_condition = initial_condition.rio.clip(self.cm_grid.geometry, self.cm_grid.geometry.crs, drop=True, all_touched=True)
-            initial_condition = initial_condition.where(initial_condition>=0)
-        else:
-            logger.info('initial_condition and CM dimensions match.')
-        
-        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
-        
-        CM_xr = xr.DataArray(CM, 
-                             coords = dict(origin=initial_condition_stack.origin, destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x_c_end', 'y_c':'y_c_end'}).destination))
-        
-        cm_prediction = CM_xr.dot(initial_condition_stack).unstack().rio.set_spatial_dims(x_dim='x_c_end',y_dim='y_c_end')
-        
-        self.cm_prediction = cm_prediction
-        
-        return cm_prediction
 
 
     def predict_with_CM(self, initial_condition, initial_condition_crs='epsg:4326', CM=None, k=None, sum=False):
+        """Predict the probability distribution k Markov steps ahead of initial_condition.
+
+        Only works when CM is a grid covering the whole domain: if initial_condition has
+        shape (m,n), CM must have shape (mxn, mxn).
+
+        Parameters
+        ----------
+        initial_condition : xr.DataArray
+            Initial probability/occupancy field, reprojected and matched onto self.grid.mask.
+        initial_condition_crs : str
+            CRS of initial_condition, default 'epsg:4326'.
+        CM : sparse array, optional
+            Connectivity/transition matrix to use; defaults to self.CM.
+        k : int, optional
+            Number of Markov steps to propagate forward. If None, a single step is applied.
+        sum : bool
+            If True (and k is not None), sum the distribution over all steps 0..k (as in
+            Chamberlain et al. (2023): "the probability of a float sampling a given region
+            within a range of time steps") instead of returning only the k-th step.
+
+        Returns
+        -------
+        xr.DataArray
+            Predicted distribution over self.grid.mask.
+
+        Notes
+        -----
+        The distribution is propagated incrementally as a vector (v <- v @ CM, k times,
+        accumulated when sum=True) rather than by forming the full matrix power CM**k via
+        matrix_power. CM itself never changes, so this avoids the sparsity fill-in that makes
+        repeated squaring of a sparse matrix progressively denser (and slower) as k grows;
+        cost becomes O(k * nnz(CM)) instead of superlinear in k.
+        """
     # only works when CM is a grid covering the whole domain.
     # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
         if CM is None:
@@ -1224,43 +1635,77 @@ class PMAR(object):
 
         if initial_condition.data[~np.isnan(initial_condition.data)].shape[0] != CM.shape[0]:
             logger.warning('initial_condition and CM dimensions do not match')#. clipping initial_condition to match cm_grid.')
-            initial_condition = initial_condition.rio.clip(self.cm_grid[self.cm_grid[list(self.cm_grid.columns.drop('geometry'))[0]] >=0].geometry, self.cm_grid.geometry.crs, drop=False, all_touched=True)
+            #initial_condition = initial_condition.rio.clip(self.cm_grid[self.cm_grid[list(self.cm_grid.columns.drop('geometry'))[0]] >=0].geometry, self.cm_grid.geometry.crs, drop=False, all_touched=True)
             initial_condition = initial_condition.where(initial_condition>=0)
+            initial_condition = initial_condition.where(self.grid.mask>0)
         else:
             logger.info('initial_condition and CM dimensions match.')
         
         initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
         print(initial_condition_stack.shape)
+        
         ## this would be for the case where an extra node was added to denote "everywhere else" outside of cm_grid.
         ## but unstack obviously does not work, so can't return a datarray in lon, lat. only a sparse matrix. 
         maxbin = int(self.grid.bin_n.max().data)
         if len(self.cm_grid)-1 > maxbin:
             logger.warning('adding extra node to network')
-            _initial_condition_stack = xr.concat([initial_condition_stack, xr.DataArray(data=[[1]], dims={'x_c':0, 'y_c':0}).stack(origin=('y_c','x_c'))], dim='origin')
+            _initial_condition_stack = xr.concat([initial_condition_stack, xr.DataArray(data=[[0]], dims={'x_c':0, 'y_c':0}).stack(origin=('y_c','x_c'))], dim='origin')
             print(_initial_condition_stack.shape)
         else:
             _initial_condition_stack = initial_condition_stack
             print(_initial_condition_stack.shape)
         
-        ic_sparse = diags(_initial_condition_stack.data, shape=(CM.shape), format='coo')
+        # ic_sparse = diags(_initial_condition_stack.data, shape=(CM.shape), format='coo')
+        # replaced by a sparse row vector: ic_sparse.dot(CM).sum(0) was only ever computing
+        # v @ CM for the vector v held on the diagonal, so building the full n x n diagonal
+        # matrix was unnecessary.
+        n_ic = len(_initial_condition_stack.data)
+        ic_vec = coo_array(
+            (_initial_condition_stack.data, (np.zeros(n_ic, dtype=int), np.arange(n_ic))),
+            shape=(1, CM.shape[0])
+        ).tocsr()
 
         if k is not None:
+            CM_csr = CM.tocsr()
             if sum is True:
                 # like in Chamberlain et al. (2023), "the probability of a float sampling a given region within a range of time steps"
                 #CM = np.sum(matrix_power(CM, i) for i in range(1,k+1))
-                CM = self.CM
-                for i in range(2,k+1):
-                        CM += matrix_power(self.CM,i)
-            
+                #CM = self.CM
+                # single_CM = CM
+                # new_CM = 0
+                # for i in range(0,k+1): #k+1 otherwise range goes up to k-1
+                #     new_CM += matrix_power(single_CM,i) # this is wrong when there is a dummy node with high probability!!!
+                # CM = new_CM
+                # incremental vector propagation instead of recomputing matrix_power(CM, i)
+                # from scratch for every i (same formula/result, O(k) instead of O(k log k)
+                # with progressive sparsity fill-in): total = sum_{i=0}^{k} v @ CM**i
+                current = ic_vec.copy()
+                total = ic_vec.copy()  # i=0 term: CM**0 = I, so v @ I = v
+                for _ in range(1,k):
+                    current = current.dot(CM_csr)
+                    print('current sum =', current.sum(), 'current sum excluding leakage cell =', current[:,:-1].sum())
+                    total = total + current
+                    print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
+                cm_prediction_sparse = total
+                print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
             else:
-                CM = matrix_power(CM, k)
-    
-            
-        cm_prediction_sparse = ic_sparse.dot(CM).sum(0)
+                # CM = matrix_power(CM, k)
+                # incremental vector propagation instead of forming CM**k as a full matrix
+                # (avoids the fill-in that makes sparse matrix_power progressively slower for
+                # larger k): current = v @ CM**k
+                current = ic_vec.copy()
+                for _ in range(k): # 1, k+1? otherwise range gets only up k-1?
+                    current = current.dot(CM_csr)
+                    #print('total sum =', current.sum(), 'sum excluding leakage cell =', current[:,:-1].sum())
+                cm_prediction_sparse = current
 
+        else:
+            cm_prediction_sparse = ic_vec.dot(CM)
+            
         # adding maxbin to exclude "dummy" node before reprojection
-        cm_prediction = xr.DataArray(np.array(cm_prediction_sparse)[0][:maxbin+1],
+        cm_prediction = xr.DataArray(cm_prediction_sparse.toarray()[0][:maxbin+1],
                               coords = dict(destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x', 'y_c':'y'}).destination)).unstack().sortby('x').sortby('y').rio.write_crs(4326).rio.reproject_match(self.grid.mask)
+        print(cm_prediction.sum().data)
         # reproject match is needed to avoid tiny discrepancies in precision of x,y variables which cause the grids to mismatch
         
         self.cm_prediction = cm_prediction
@@ -1270,17 +1715,55 @@ class PMAR(object):
 
     
     def get_network(self, CM=None, node_names=None):
+        """
+        Build a directed networkx graph from the connectivity matrix CM.
+
+        Parameters
+        ----------
+        CM : scipy.sparse array, optional
+            Connectivity/transition matrix to use as the graph's adjacency matrix. Default
+            is None, i.e. self.CM.
+        node_names : dict, optional
+            Mapping of node index to a name, attached to each node as 'node_name' (e.g. use
+            cm_grid['layer'].to_dict()). Default is None.
+
+        Returns
+        -------
+        networkx.DiGraph
+            The resulting directed graph (also stored on self.network).
+        """
         # use cm_grid['layer'].to_dict() for node_names
         self.node_names = node_names
         if CM is None:
             CM = self.CM
-        G = nx.from_scipy_sparse_array(CM, create_using=nx.MultiDiGraph, edge_attribute='weight', parallel_edges=True) # important to specify DiGraph (directed graph) and parallel edges
+        G = nx.from_scipy_sparse_array(CM, create_using=nx.DiGraph, edge_attribute='weight', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges
         if node_names is not None:
             nx.set_node_attributes(G, values=node_names, name='node_name')
         self.network = G
         return G
 
     def plot_network(self, node_shapes=None, show_map=False, rescale_edge=None, width=2, figsize=[7,7], extent=None, cmap=None):
+        """
+        Plot self.network (built by get_network) via pmar.plotting._plot_network.
+
+        Parameters
+        ----------
+        node_shapes : bool or geopandas.GeoDataFrame, optional
+            If True, use self.cm_grid as the node shapes/positions; alternatively pass a
+            GeoDataFrame directly. Default is None (nodes plotted without shapes).
+        show_map : bool, optional
+            Whether to overlay a basemap. Default is False.
+        rescale_edge : optional
+            Edge-width rescaling option passed to _plot_network. Default is None.
+        width : float, optional
+            Base edge width. Default is 2.
+        figsize : list, optional
+            Figure size [width, height]. Default is [7, 7].
+        extent : list, optional
+            Map extent to restrict the plot to. Default is None.
+        cmap : str, optional
+            Colormap for edges/nodes. Default is None.
+        """
         from pmar.plotting import _plot_network
         if node_shapes is True:
             node_shapes = self.cm_grid
@@ -1290,6 +1773,25 @@ class PMAR(object):
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
     def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
+        """
+        Compute, per grid cell, the (optionally weighted) fraction of a trajectory's total
+        time steps that were spent in that cell, summed over all trajectories.
+
+        Parameters
+        ----------
+        res : float
+            Resolution used to bin trajectories (passed to get_histogram).
+        study_area : list, optional
+            Spatial bounds for the grid. Default is None.
+        use : str, optional
+            Path to a use raster; if given, weights are (re)computed via set_weights before
+            binning. Default is None (uses self.ds.weight if present, else unweighted).
+
+        Returns
+        -------
+        xr.DataArray
+            Per-cell time-fraction, summed over trajectories.
+        """
         counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
         
         if use is not None:
@@ -1310,6 +1812,23 @@ class PMAR(object):
         return tpb.fillna(0.).sum('trajectory')
 
     def traj_density(self, res, study_area=None): # similar to emodnet route density
+        """
+        Compute a "distinct trajectory density" (route density) raster, similar to EMODnet
+        route density: repeated same-cell visits by a single trajectory are deduplicated
+        before binning, so a trajectory lingering in a cell doesn't inflate its density.
+
+        Parameters
+        ----------
+        res : float
+            Resolution used to bin trajectories.
+        study_area : list, optional
+            Spatial bounds for the grid. Default is None.
+
+        Returns
+        -------
+        xr.DataArray
+            Histogram of deduplicated per-trajectory weights per grid cell.
+        """
         w = self.set_weights(1)
         self.ds = self.get_bin_n(res=res, t='all')
         w_distinct = xr.apply_ufunc(traj_distinct, self.ds.bin_n.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), w.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), input_core_dims = [['time'],['time']], output_core_dims = [['time']], vectorize=True, dask='parallelized')
@@ -1319,14 +1838,23 @@ class PMAR(object):
 
     def write_tiff(self, h, crs=4326, path=None, description=None, output_dir=None):# instead of use label, could do 'assign_attrs' for any attributes, including use_label, i might want to add
         '''
-        Georeferences histogram and writes it as tif. 
-        
+        Georeference a histogram/raster array and write it to disk as a GeoTIFF.
+
         Parameters
         ----------
+        h : array-like
+            Raster data to write (e.g. a histogram from get_histogram).
         crs : int, optional
-            epsg code
-        write_tif = bool, optional
-            Whether to write raster as a tif file. 
+            EPSG code to write on the raster. Default is 4326.
+        path : str, optional
+            Output file path. Default is None; required unless output_dir is used to build
+            a path from an existing `path`.
+        description : str, optional
+            If given, appended to the output filename as f'_use-{description}.tif'. Default
+            is None.
+        output_dir : str, optional
+            If given, directory to write the file into instead of the directory implied by
+            `path` (the filename is kept). Default is None.
         '''
         r = (
             xr.DataArray(h) 
@@ -1354,24 +1882,64 @@ class PMAR(object):
 
     def run(self, pnum, start_time, duration, res, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, pnum_per_shape=False, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, save_tiffs=False, crs='4326', output_dir=None):
         '''
-        Compute trajectories and producing raster maps of ppi.
-        
+        Top-level single-seeding pipeline: compute trajectories, then the PPI raster, then
+        summary indicators. Equivalent to calling get_trajectories(), get_ppi() and
+        get_indicators() in sequence.
+
         Parameters
         ----------
-        pnum : intf
+        pnum : int
             Number of particles to seed, i.e. trajectories to calculate.
         start_time : string
             Start date of the run, in YYYY-MM-DD format.
         duration : float
-            Duration of the run, in days. 
+            Duration of the run, in days.
         res : float
             Resolution of output rasters, in lon/lat degrees.
-        use : string, optional
-            Path to map of human activities (.tiff) considered as pressure source. Default is None
+        tstep : timedelta, optional
+            OpenDrift simulation time step. Default is timedelta(hours=1).
+        study_area : list, optional
+            Spatial bounds [xmin, ymin, xmax, ymax] for rasterization. Default is None.
+        seeding_shapefile : str, optional
+            Path to a shapefile to seed particles within. Default is None.
+        seed_within_bounds : list, optional
+            Spatial bounds to seed within, if no seeding_shapefile is given. Default is None.
+        z : float, optional
+            Depth at which to seed particles [m]. Default is -0.5.
+        seeding_radius : float, optional
+            OpenDrift seeding "radius". Default is 0.
+        pnum_per_shape : bool, optional
+            If True, seed pnum particles within each shape of seeding_shapefile rather than
+            across the whole shapefile. Default is False.
+        beaching : bool, optional
+            Whether particles reaching the coastline can beach ('stranding'). Default is False.
+        hdiff : float, optional
+            Horizontal diffusivity of particles [m2/s]. Default is 10.
+        termvel : float, optional
+            Currently unused directly by this method body (get_trajectories is called
+            without it, so its own default of 0 applies); kept for API consistency.
+            Default is 0.
+        stokes_drift : bool, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is False.
         decay_coef : float, optional
             Coefficient k of exponential decay function. Default is 0 (no decay)
-        output_dir : dict, optional
-
+        use : string, optional
+            Path to map of human activities (.tiff) considered as pressure source. Default is None
+        use_label : str, optional
+            Label identifying the `use` raster, used in cache keys/output filenames. Default
+            is None.
+        emission : float, optional
+            Amount of pressure released per day by the source in `use`. Default is None.
+        save_tiffs : bool, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is False.
+        crs : str, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is '4326'.
+        output_dir : str, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is None.
         '''
 
         self.res = res
@@ -1388,26 +1956,63 @@ class PMAR(object):
     
 
 
-class PMARmulti(PMAR): 
+class PMARmulti(PMAR):
     """
-    Developed at CNR ISMAR in Venice.
+    Multi-seeding variant of PMAR: repeats trajectory generation over several seedings
+    (optionally time-shifted via tshift) and aggregates the resulting PPI rasters and
+    connectivity matrices across seedings.
 
-    ...
+    Developed at CNR ISMAR in Venice. Inherits PMAR's single-seeding machinery and overrides
+    get_trajectories, get_ppi, run, and get_Pij to loop over self.seedings repetitions
+    (using a temporary single-seeding PMAR instance, `temp_self`, sharing this object's
+    state, to compute per-seeding results before aggregating them). Adds sum_seedings() to
+    sum per-seeding PPI rasters.
 
     Attributes
     ----------
+    seedings : int or None
+        Number of seedings/repetitions for the current run.
+    tshift : int or None
+        Time shift (in days) applied between successive seedings.
+    ppi_list : list
+        Paths to each seeding's individual PPI raster, aggregated by sum_seedings().
 
-
-    Methods
-    -------
-
-
+    See PMAR's class docstring for the remaining inherited attributes/methods.
     """
         
 
 
     def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), seedings=1, tshift=0, end_time=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+        """
+        Compute trajectories for `seedings` repetitions, each start-time-shifted by tshift
+        days from the previous one, and combine them all into self.ds.
 
+        Parameters
+        ----------
+        pnum, seed_time, seeding_shapefile, seed_within_bounds, z, tstep, hdiff, termvel,
+        crs, seeding_radius, beaching, stokes_drift, pnum_per_shape :
+            Passed through unchanged to PMAR.get_trajectories() for each seeding; see its
+            docstring for details.
+        start_time : string
+            Start date of the first seeding, in YYYY-MM-DD format. Each subsequent seeding n
+            starts at start_time + n * tshift days.
+        seedings : int, optional
+            Number of repeated seedings to run. Default is 1.
+        tshift : int, optional
+            Time shift, in days, applied between successive seedings' start times.
+            Default is 0.
+        end_time : string, optional
+            If given, overrides duration_days: each seeding's duration is computed as
+            (end_time - that seeding's shifted start_time). Default is None.
+        duration_days : int, optional
+            Duration, in days, of each seeding (ignored if end_time is given). Default is 30.
+
+        Notes
+        -----
+        Sets self.seedings, self.tshift, self.seeding_radius, appends each seeding's output
+        path to self.particle_list, and finally calls self.import_trajectories() to load all
+        seedings combined into self.ds.
+        """
         self.seedings = seedings
         self.tshift = tshift
         self.seeding_radius = seeding_radius
@@ -1427,43 +2032,45 @@ class PMARmulti(PMAR):
             
             #pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
             
-            super().get_trajectories(pnum=pnum, start_time=rep_start_time, seed_time=seed_time, duration_days=rep_duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            super().get_trajectories(pnum=pnum, start_time=rep_start_time, seed_time=seed_time, duration_days=rep_duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
             logger.info(f'Done with rep #{n}.')
             self.particle_list.append(self.particle_path)
 
         self.import_trajectories(self.particle_list)
-
-
-    def import_trajectories(self, files_to_import): #, align_by = 'time'):
-        if type(files_to_import) is str:
-#            self.particle_path = files_to_import
- #           ds = xr.open_dataset(self.particle_path)
-  #          print('string')
-            raise ValueError('Please use PMAR class to import a single trajectory file.')
-            
-        elif type(files_to_import) is list:
-            self.particle_list = files_to_import
-            self.seedings = len(self.particle_list)
-            
-            ds = xr.open_mfdataset(self.particle_list, parallel=True, combine='nested', join='outer', concat_dim='seeding') # this will give all seedings the same dimensions and pad them with nans
-            print('list')
-            
-        elif type(files_to_import) is xr.core.dataset.Dataset:
-            ds = files_to_import 
-            print('ds')
-        
-#        elif type(files_to_import) is list:
- #           raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
-        else:
-            raise ValueError('Type of files_to_import unrecognised. please provide path(s) to file(s) or xarray Dataset.')
-    
-        self.ds = ds[['lon','lat','z','age_seconds', 'origin_marker']]#.ffill('time') # is this what we want?
-        # giving all traj unique id?
-        pass
         
 
-    def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0): 
-        
+    def get_ppi(self, res, use=None, use_label=None, emission=None, study_area=None, decay_coef=0):
+        """
+        Compute the PPI raster aggregated across all seedings in self.particle_list.
+
+        For each seeding's particle file, builds a temporary single-seeding PMAR instance
+        sharing this object's state, computes that seeding's PPI via PMAR.get_ppi(), then
+        sums all per-seeding PPI rasters (via sum_seedings) and divides by the number of
+        seedings to get the averaged multi-seeding PPI.
+
+        Parameters
+        ----------
+        res : float
+            Resolution of the output PPI raster.
+        use : str, optional
+            Path to map of human activities (.tiff) considered as pressure source. Reused
+            across seedings once computed for the first one that needs it. Default is None.
+        use_label : str, optional
+            Label identifying the `use` raster, used in cache keys/output filenames. Default
+            is None.
+        emission : float, optional
+            Amount of pressure released per day by the source in `use`. Default is None.
+        study_area : list, optional
+            Spatial bounds [xmin, ymin, xmax, ymax] for rasterization. Default is None.
+        decay_coef : float, optional
+            Coefficient k of exponential decay function. Default is 0 (no decay).
+
+        Notes
+        -----
+        Checks a raster cache keyed on the multi-seeding config first; if found, loads the
+        cached PPI instead of recomputing. Sets self.output['ppi'], self.ppi_list, and
+        self.ppi_path.
+        """
         ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
 
         self.ppi_cache = PMARCache(ppi_output_dir)
@@ -1480,7 +2087,7 @@ class PMARmulti(PMAR):
         else:
         
             for pfile in self.particle_list:
-                temp_self = PMAR()
+                temp_self = PMAR(_internal=True)
                 temp_self.__dict__ = self.__dict__
                 
                 temp_self.import_trajectories(pfile)
@@ -1495,7 +2102,7 @@ class PMARmulti(PMAR):
 
             self.import_trajectories(self.particle_list)
             
-            self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding)
+            self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding) # divide by n of seedings
             self.write_tiff(self.output['ppi'], path=ppi_path)
             self.ppi_path = ppi_path
     
@@ -1525,30 +2132,72 @@ class PMARmulti(PMAR):
     # can get particle_list from particle_cache
     def run(self, pnum, start_time, duration, res, seedings=1, tshift=0, end_time=None, tstep=timedelta(hours=1), study_area=None, seeding_shapefile=None, seed_within_bounds=None, z=-0.5, seeding_radius=0, pnum_per_shape=False, beaching=False, hdiff=10, termvel=0, stokes_drift=False, decay_coef=0, use=None, use_label=None, emission=None, output_dir=None, save_tiffs=False, thumbnail=None, crs='4326'):
         '''
-        Compute trajectories and produce ppi raster over required number of seedings. 
-    
+        Top-level multi-seeding pipeline: compute trajectories (over `seedings` repetitions)
+        and produce the aggregated PPI raster and summary indicators. Equivalent to calling
+        get_trajectories(), get_ppi() and get_indicators() in sequence, but first checks a
+        raster cache and skips recomputation entirely if a matching PPI already exists.
+
         Parameters
         ----------
         pnum : int
-    
-        seedings : int
-    
-        tshift : int
-    
-        duration : int, optional
-    
-        start_time : string, optional
-    
-        res : float, optional
-
+            Number of particles to seed per repetition.
+        start_time : string
+            Start date of the first seeding, in YYYY-MM-DD format.
+        duration : float
+            Duration of each seeding, in days (ignored if end_time is given).
+        res : float
+            Resolution of output rasters, in lon/lat degrees.
+        seedings : int, optional
+            Number of repeated seedings to run. Default is 1.
+        tshift : int, optional
+            Time shift, in days, applied between successive seedings' start times. Default is 0.
+        end_time : string, optional
+            If given, overrides `duration`: each seeding's duration is computed from its
+            shifted start_time to end_time. Default is None.
+        tstep : timedelta, optional
+            OpenDrift simulation time step. Default is timedelta(hours=1).
         study_area : list, optional
-    
-        use : string, optional
-
-        use_label : string, optional
-    
+            Spatial bounds [xmin, ymin, xmax, ymax] for rasterization. Default is None.
+        seeding_shapefile : str, optional
+            Path to a shapefile to seed particles within. Default is None.
+        seed_within_bounds : list, optional
+            Spatial bounds to seed within, if no seeding_shapefile is given. Default is None.
+        z : float, optional
+            Depth at which to seed particles [m]. Default is -0.5.
+        seeding_radius : float, optional
+            OpenDrift seeding "radius". Default is 0.
+        pnum_per_shape : bool, optional
+            If True, seed pnum particles within each shape of seeding_shapefile rather than
+            across the whole shapefile. Default is False.
+        beaching : bool, optional
+            Whether particles reaching the coastline can beach ('stranding'). Default is False.
+        hdiff : float, optional
+            Horizontal diffusivity of particles [m2/s]. Default is 10.
+        termvel : float, optional
+            Terminal velocity of particles [m/s]. Default is 0.
+        stokes_drift : bool, optional
+            Whether to include Stokes drift. Default is False.
         decay_coef : float, optional
-        
+            Coefficient k of exponential decay function. Default is 0 (no decay).
+        use : string, optional
+            Path to map of human activities (.tiff) considered as pressure source. Default is None.
+        use_label : string, optional
+            Label identifying the `use` raster, used in cache keys/output filenames. Default
+            is None.
+        emission : float, optional
+            Amount of pressure released per day by the source in `use`. Default is None.
+        output_dir : str, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is None.
+        save_tiffs : bool, optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is False.
+        thumbnail : optional
+            Currently unused directly by this method body; kept for API consistency.
+            Default is None.
+        crs : str, optional
+            EPSG string for seeding polygons, passed through to get_trajectories.
+            Default is '4326'.
         '''
 
         self.seedings = seedings
@@ -1557,7 +2206,7 @@ class PMARmulti(PMAR):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(spatial_domain=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         if not self.output:
             self.output = xr.Dataset()
@@ -1576,12 +2225,49 @@ class PMARmulti(PMAR):
 
     def get_Pij(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filenames=None):
         '''
-        Average transition matrix 
+        Compute the connectivity matrix CM averaged across all seedings in self.particle_list.
+
+        For each seeding's particle file, builds a temporary single-seeding PMAR instance
+        sharing this object's state, imports that seeding's trajectories (sliced to
+        [t0, t1)), optionally applies weights (if self.use is set), computes that seeding's
+        transition matrix via PMAR.get_Pij(), and accumulates the mean across all seedings.
+
+        Parameters
+        ----------
+        cm_grid : geopandas.GeoDataFrame, optional
+            Polygon grid to use. Default is None.
+        res : float, optional
+            Resolution for building a new grid, if cm_grid is None. Default is None.
+        study_area : list, optional
+            Spatial bounds for the grid. Default is None.
+        t0 : int, optional
+            Start timestep index (inclusive) to slice each seeding's trajectories to.
+            Default is 0.
+        t1 : int, optional
+            End timestep index (exclusive) to slice each seeding's trajectories to, and the
+            timestep at which transitions are evaluated. Default is -1.
+        buffer : float, optional
+            Buffer distance added around cm_grid as an extra "outside" node. Default is None.
+        filenames : list of str, optional
+            Per-seeding paths to write each seeding's individual transition matrix to.
+            Default is None.
+
+        Returns
+        -------
+        scipy.sparse array
+            The averaged transition matrix (also stored on self.CM).
+
+        Notes
+        -----
+        The per-seeding temp_self shares self.__dict__, so importing each seeding's
+        trajectories overwrites self.ds along the way; self.ds is re-imported from
+        self.particle_list at the end to restore the full multi-seeding dataset (with the
+        'seeding' dimension) before returning.
         '''
         for i, file in enumerate(self.particle_list):
             logger.info(f'Calculating average CM out of {len(self.particle_list)} particle files.')
             ds = xr.open_dataset(file).isel(time=slice(t0,t1))
-            temp_self = PMAR()
+            temp_self = PMAR(_internal=True)
             temp_self.__dict__ = self.__dict__
             temp_self.import_trajectories(ds)
             if hasattr(self, 'use') and self.use is not None: # to avoid re-rasterizing use for every seeding
@@ -1592,12 +2278,16 @@ class PMARmulti(PMAR):
 
             if filenames is not None:
                 filename = filenames[i]
+            else:
+                filename = None
                 
-            temp_self.get_Pij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1, buffer=buffer, filename=filename, weighted=weighted)
+            temp_self.get_Pij(cm_grid=cm_grid, res=res, study_area=study_area, t=-1, buffer=buffer, filename=filename, weighted=weighted)
             if i == 0:
                 Pij = temp_self.CM/len(self.particle_list)
             else:
                 Pij = Pij + temp_self.CM/len(self.particle_list)
             del temp_self
             logger.info(f'Done calculating CM for particle file {i}.')
+        self.import_trajectories(self.particle_list) # restore self.ds to the full multi-seeding dataset, since temp_self shares self.__dict__ and overwrote it with each seeding's single-seeding ds above
         self.CM = Pij
+        return Pij
