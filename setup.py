@@ -3,6 +3,7 @@ from distutils.core import setup
 
 
 def read(*rnames):
+    """Read and return the contents of a file located relative to this file's directory."""
     return open(os.path.join(os.path.dirname(__file__), *rnames)).read()
 
 setup(

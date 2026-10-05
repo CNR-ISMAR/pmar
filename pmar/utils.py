@@ -23,20 +23,36 @@ logger = logging.getLogger('pmar')
 
 def get_copernicus(spatial_domain):
     """
+    Return the Copernicus Marine (CMEMS) reader configuration for a given ocean basin.
+
     Parameters
-    ---------- 
-    context : str
-        One of 'global', 'med', 'black sea', 'baltic'. Returns strings to relevant Copernicus products to add as OpenDrift readers. 
+    ----------
+    spatial_domain : str
+        Name of the ocean basin to retrieve Copernicus data for. One of 'global', 'med',
+        'black sea' or 'baltic'.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys 'readers' (a dict mapping variable name, e.g. 'currents',
+        'winds', 'bathymetry', 'mixed-layer', 'stokes', to its Copernicus Marine dataset
+        id), 'extent' (the basin's spatial extent as [xmin, ymin, xmax, ymax]) and 'label'
+        (a human-readable name for the basin).
+
+    Raises
+    ------
+    ValueError
+        If spatial_domain is not one of the supported basins.
     """
     
     spatial_domains = {'global': 
                     {'readers': 
                      {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
                       'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
-                      'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
+                      #'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
                       #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
-                      'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
-                      'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                 #     'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                  #    'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                      },
                     'extent': [-180, -80, 179.92, 90],
                      'label': 'CMEMS_Global_Renalysis'
@@ -91,6 +107,26 @@ def get_copernicus(spatial_domain):
 
 
 def make_poly(bounds, crs='4326', save_to=None):
+    """
+    Create a single rectangular polygon covering the given bounds, as a GeoDataFrame with
+    one row (ID 'seeding_polygon'), optionally saving it as a shapefile.
+
+    Parameters
+    ----------
+    bounds : list or array-like
+        Bounding box as [xmin, ymin, xmax, ymax].
+    crs : str, optional
+        EPSG code (without the 'EPSG:' prefix) for bounds and the output polygon. Default
+        is '4326'.
+    save_to : str, optional
+        Path to save the polygon as an ESRI Shapefile. Default is None, i.e. the polygon
+        is not saved.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with a single row containing the rectangular polygon.
+    """
     df = pd.DataFrame()
     df['ID'] = ['seeding_polygon']
     df['geometry'] = box(bounds[0], bounds[1], bounds[2], bounds[3])
@@ -101,67 +137,108 @@ def make_poly(bounds, crs='4326', save_to=None):
         #self.poly_path = str(q)
     return poly
 
-def _make_poly(lon, lat, crs='4326', save_to=None):
-    """
-    Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile. 
-    
-    Parameters
-    ----------
-    lon : list or array
-        Either a list giving 2 bounds or an array of lon coordinates.
-    lat : list or array
-        Either a list giving 2 bounds or an array of lat coordinates.
-    crs : str, optional
-        EPSG string for Polygon crs. Default is '4326'
-    write : bool, optional
-        Whether to save the polygon as a shapefile in the 's' directory. Default is True
-    """
-    
-    
-    #Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-    #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-    #q = self.basedir / 'polygons' / poly_path
-    
-    if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
-        _df = pd.DataFrame() # create dataframe 
-        _df['lon'] = lon # add lon and lat arrays
-        _df['lat'] = lat
-        _df['geometry'] = Polygon(zip([lon[0],lon[0],lon[1],lon[1]], [lat[0],lat[1],lat[1],lat[0]]))
-        poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
-
-    elif len(np.array(lon)) > 2 and len(np.array(lat)) > 2:
-        x, y = np.meshgrid(lon, lat)
-
-        _df = pd.DataFrame() # create dataframe 
-        _df['lon'] = x.ravel() # add lon and lat arrays
-
-        _df['lat'] = y.ravel()
-        _df['geometry'] = _df.apply(lambda r: Point(r.lon, r.lat), axis=1) # create point geometries
-
-        df = gpd.GeoDataFrame(_df, geometry="geometry") # transform into geodataframe
-
-        # buffer. cap_style = 3 means a square buffer. (creates square around centroid with distance 'res' between centroid and side)
-        buffer = df['geometry'].buffer(np.diff(lon).mean()/2, cap_style = 3)
-        # add buffered polygon to geo df
-        df['squares'] = buffer
-        gds = gpd.GeoDataFrame(df, geometry="squares")
-        # create polygon by dissolving squares into each other
-        #poly = gds.dissolve()
-        # set crs and reproject to desired crs 
-        #poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
-        poly = gds.set_crs(epsg=crs).to_crs(epsg='4326')
-
-    else:
-        raise ValueError("'lon' and 'lat' must have length larger than 2")
-    
-    if save_to is not None:
-        poly.to_file(save_to, driver='ESRI Shapefile')
-        #self.poly_path = str(q)
-
-    return poly
+# unused (only reference elsewhere is commented out in pmar.py) - kept for reference
+# def _make_poly(lon, lat, crs='4326', save_to=None):
+#     """
+#     Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile.
+#
+#     If lon and lat each have length 2, they are treated as [min, max] bounds and a single
+#     rectangular polygon is created. If they have length greater than 2, they are treated as
+#     coordinate arrays: a square buffer (of half the mean coordinate spacing) is built around
+#     every point of the lon/lat meshgrid, producing a GeoDataFrame of adjoining square cells.
+#
+#     Parameters
+#     ----------
+#     lon : list or array
+#         Either a list giving 2 bounds or an array of lon coordinates.
+#     lat : list or array
+#         Either a list giving 2 bounds or an array of lat coordinates.
+#     crs : str, optional
+#         EPSG code (without the 'EPSG:' prefix) that lon/lat are given in. Default is '4326'.
+#     save_to : str, optional
+#         Path to save the polygon(s) as an ESRI Shapefile. Default is None, i.e. not saved.
+#
+#     Returns
+#     -------
+#     geopandas.GeoDataFrame
+#         GeoDataFrame (reprojected to EPSG:4326) containing either the single rectangular
+#         polygon, or one square polygon per lon/lat grid point.
+#
+#     Raises
+#     ------
+#     ValueError
+#         If lon and lat do not both have length 2, and do not both have length greater than 2.
+#     """
+#
+#
+#     #Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
+#     #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
+#     #q = self.basedir / 'polygons' / poly_path
+#
+#     if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
+#         _df = pd.DataFrame() # create dataframe
+#         _df['lon'] = lon # add lon and lat arrays
+#         _df['lat'] = lat
+#         _df['geometry'] = Polygon(zip([lon[0],lon[0],lon[1],lon[1]], [lat[0],lat[1],lat[1],lat[0]]))
+#         poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
+#
+#     elif len(np.array(lon)) > 2 and len(np.array(lat)) > 2:
+#         x, y = np.meshgrid(lon, lat)
+#
+#         _df = pd.DataFrame() # create dataframe
+#         _df['lon'] = x.ravel() # add lon and lat arrays
+#
+#         _df['lat'] = y.ravel()
+#         _df['geometry'] = _df.apply(lambda r: Point(r.lon, r.lat), axis=1) # create point geometries
+#
+#         df = gpd.GeoDataFrame(_df, geometry="geometry") # transform into geodataframe
+#
+#         # buffer. cap_style = 3 means a square buffer. (creates square around centroid with distance 'res' between centroid and side)
+#         buffer = df['geometry'].buffer(np.diff(lon).mean()/2, cap_style = 3)
+#         # add buffered polygon to geo df
+#         df['squares'] = buffer
+#         gds = gpd.GeoDataFrame(df, geometry="squares")
+#         # create polygon by dissolving squares into each other
+#         #poly = gds.dissolve()
+#         # set crs and reproject to desired crs
+#         #poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
+#         poly = gds.set_crs(epsg=crs).to_crs(epsg='4326')
+#
+#     else:
+#         raise ValueError("'lon' and 'lat' must have length larger than 2")
+#
+#     if save_to is not None:
+#         poly.to_file(save_to, driver='ESRI Shapefile')
+#         #self.poly_path = str(q)
+#
+#     return poly
 
 def make_grid(res, study_area, crs='epsg:4326'):
-    
+    """
+    Build a regular spatial grid over study_area at resolution res, masked to ocean cells,
+    with each ocean cell assigned a unique sequential bin number.
+
+    Parameters
+    ----------
+    res : float
+        Grid cell size (in crs units), used for both x and y directions.
+    study_area : list or array-like
+        Bounding box of the grid as [xmin, ymin, xmax, ymax].
+    crs : str, optional
+        CRS to assign to the grid. Default is 'epsg:4326'.
+
+    Returns
+    -------
+    xarray.Dataset
+        Dataset with coordinates x_e/y_e (cell edges) and x_c/y_c (cell centres), and
+        variables:
+        - dx, dy : cell size in x/y (equal to res)
+        - Xc, Yc : 2D meshgrid of cell-centre coordinates, dims ('y_c', 'x_c')
+        - mask : 1 where the cell centre falls within the ocean (10m resolution Natural
+          Earth ocean polygons), NaN elsewhere
+        - bin_n : unique sequential integer id (0-based) for each ocean grid cell, NaN over
+          land; used to bin/group trajectories spatially (see get_bin_n).
+    """
     #if study_area is None:
       #  study_area = self.study_area
 
@@ -210,6 +287,26 @@ def make_grid(res, study_area, crs='epsg:4326'):
     return grid
 
 def make_vector_grid(raster_grid, buffer=None):
+    """
+    Convert a raster grid (e.g. the 'bin_n' or 'mask' variable of make_grid's output) into a
+    vector GeoDataFrame of one polygon per cell, dropping empty cells.
+
+    Parameters
+    ----------
+    raster_grid : xarray.DataArray or xarray.Dataset
+        Raster grid to vectorize (via geocube.vector.vectorize).
+    buffer : float, optional
+        If given, an extra polygon is appended representing the ring between the dissolved
+        grid boundary and that boundary buffered outward by this distance (in the grid's crs
+        units), with a placeholder value of -1234 in the data column. Useful to add a fringe
+        of "outside the grid" area around the vectorized grid. Default is None, i.e. no
+        buffer polygon is added.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        Vectorized grid cells (plus, if buffer is given, one additional buffer-ring row).
+    """
     vector_grid = vectorize(raster_grid).dropna()
     if buffer is not None:
         buff = vector_grid.dissolve().buffer(buffer)
@@ -220,8 +317,20 @@ def make_vector_grid(raster_grid, buffer=None):
     
 def get_marine_polygon(basin=None):
     '''
-    Returns gdf with polygon of requested basin, to be used with OpenDrift's seed_from_polygon.
-    Default (None) returns global ocean.
+    Return a GeoDataFrame with the polygon of the requested marine region, to be used with
+    OpenDrift's seed_from_polygon.
+
+    Parameters
+    ----------
+    basin : str, optional
+        Marine region label, matching the 'label' column of the Natural Earth
+        'geography_marine_polys' dataset (e.g. a named sea or ocean basin). Default is None,
+        i.e. all marine polygons (global ocean) are returned.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        Single-column GeoDataFrame ('geometry') with the requested polygon(s).
     '''
     # landmask from cartopy 
     shpfilename = shpreader.natural_earth(resolution='10m',
@@ -240,14 +349,20 @@ def get_marine_polygon(basin=None):
 
 def rasterhd2raster(raster_hd, grid):   
     '''
-    Reproject raster onto a new grid. 
+    Reproject raster onto a new grid.
 
     Parameters
     ----------
     raster_hd : DataArray
         the raster to reproject
     grid : DataArray
-        the grid to match raster_hd to 
+        the grid to match raster_hd to
+
+    Returns
+    -------
+    xarray.DataArray
+        raster_hd reprojected and resampled (summed) onto grid's coordinates, with nodata
+        set to 0.
     '''
     raster = (raster_hd                                                                 
               .rio.reproject_match(grid, nodata=0, resampling=Resampling.sum)
@@ -258,7 +373,23 @@ def rasterhd2raster(raster_hd, grid):
     
 def _rasterize_points_add(point_data, like, measurements=None):
     '''
-    Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
+    Rasterize point data onto the grid of like by summing measurements within each cell.
+
+    Parameters
+    ----------
+    point_data : geopandas.GeoDataFrame
+        Point geometries with a column, given by measurements, to burn into the raster.
+    like : xarray.DataArray
+        Raster grid whose shape/resolution/crs the output is rasterized to match.
+    measurements : str or list of str, optional
+        Name(s) of the column(s) in point_data to sum into each raster cell. Default is
+        None, which logs a warning since no value is specified to sum with MergeAlg.add.
+
+    Returns
+    -------
+    xarray.Dataset
+        Rasterized data on like's grid, with values in each cell equal to the sum of
+        measurements from all points falling in (or touching, all_touched=True) that cell.
     '''
     raster_data = make_geocube(vector_data=point_data, measurements=measurements, 
                     like=like,
@@ -271,7 +402,37 @@ def _rasterize_points_add(point_data, like, measurements=None):
 
 def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
     '''
-    Rasterize points on grid of resolution 'res' by adding values of variable 'measurements' in each cell.
+    Rasterize vector_data onto the grid of like, burning column_to_burn while conserving its
+    total sum: point values are summed per cell, and polygon values are rescaled by area
+    before rasterizing so that the sum of the raster over a polygon's extent matches its
+    original attribute value.
+
+    Parameters
+    ----------
+    vector_data : geopandas.GeoDataFrame
+        Vector data to rasterize. Must contain a single geometry type (either only Points or
+        only Polygons).
+    like : xarray.DataArray
+        Raster grid whose shape/resolution/crs the output is rasterized to match.
+    column_to_burn : str
+        Name of the column in vector_data whose values are burned into the raster.
+    all_touched : bool, optional
+        For Point geometries, whether cells merely touched (not just containing the point)
+        are also burned. Default is False. Not used for Polygon geometries, which are
+        instead rasterized at 3x the resolution of like for area-conservation accuracy.
+
+    Returns
+    -------
+    xarray.DataArray
+        Rasterized column_to_burn on like's grid: for points, the sum of column_to_burn
+        values falling in each cell; for polygons, the area-weighted value of column_to_burn
+        integrated over each cell (so the raster's total sum approximates the sum of
+        vector_data[column_to_burn]).
+
+    Raises
+    ------
+    ValueError
+        If vector_data contains more than one geometry type.
     '''
     if len(vector_data.geom_type.value_counts()) > 1:
         raise ValueError('please provide vector_data with a single geometry type, e.g. only polygons or only points.')
@@ -302,9 +463,41 @@ def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
 
 def harmonize_use(use, res, study_area, like, tstep=None):
     '''
-    Use can be a path to a shapefile or raster, a geopandas geodataframe or a xarray object.
-    This method rasterizes use (if needed), it reprojects it to standard projection, it resamples it on given grid and within chosen bounding box. 
-    Use is now compatible with PMAR run and ready to be assigned as weight to particles. 
+    Prepare a 'use' layer (representing e.g. human activity intensity) to be used as
+    particle weight in a PMAR run.
+
+    use can be a path to a shapefile or GeoTIFF, a geopandas GeoDataFrame or an xarray
+    DataArray. This function rasterizes use if needed (via rasterize_conserve, conserving
+    the total value for vector inputs), reprojects it to EPSG:4326, and resamples it onto
+    like's grid within study_area. If tstep is given, use is also converted from a
+    quantity/day rate into a quantity/timestep rate.
+
+    Parameters
+    ----------
+    use : str, geopandas.GeoDataFrame or xarray.DataArray
+        The use layer. If str, must be a path to a '.shp' or '.tif' file.
+    res : float
+        Resolution of the target grid, used only for logging.
+    study_area : list or array-like
+        Bounding box to clip the reprojected raster to, as [xmin, ymin, xmax, ymax].
+    like : xarray.DataArray
+        Raster grid whose shape/resolution/crs the output is resampled to match.
+    tstep : float, optional
+        Simulation time step in seconds. If given, use (assumed to be a quantity/day rate)
+        is divided by the number of timesteps per day to give a quantity/timestep rate.
+        Default is None, i.e. use is left as provided (per day).
+
+    Returns
+    -------
+    xarray.DataArray
+        use rasterized, reprojected and resampled onto like's grid, with negative values
+        clipped to 0 and NaNs filled with 0.
+
+    Raises
+    ------
+    ValueError
+        If use is a GeoDataFrame with more than one non-geometry column (ambiguous which
+        column to burn), or with no non-geometry column at all.
     '''
     try:
         #Path(use).suffix
@@ -337,22 +530,28 @@ def harmonize_use(use, res, study_area, like, tstep=None):
         raster_use = rasterize_conserve(vector_use, like=like, column_to_burn=list(vector_use.columns.drop('geometry'))[0]).rio.reproject_match(like)
         logger.debug(f'rasterized vector_use to res = {res}')
         #logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
-        
-    #raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
+
+    raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
     logger.debug('use_raster successfully reprojected')
-    #logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
+    logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data)         
+
     # need a dataarray
-    #use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
-    #logger.debug('Resampled USE TOTAL BOUNDS', use.x.min().data, use.x.max().data, use.y.min().data, use.y.max().data) 
-    # logger.debug('use_raster successfully resampled')
+    raster_use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
+    logger.debug('Resampled USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
+    logger.debug('use_raster successfully resampled')
     # if len(use.shape) > 2:
     #     use = use[0]
         
-#    use = use.where(use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
-
+    raster_use = raster_use.where(raster_use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
+    
+    # reproject should be done at the end to ensure matching coords
+    raster_use = raster_use.rio.reproject_match(like)
+   
     # convert use from quantity/day into quantity/timestep
-    # timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
-    # use = use / timesteps_per_day
+    if tstep is not None:
+        logger.warning('Make sure use is provided per day.')
+        timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
+        raster_use = raster_use / timesteps_per_day
     
     logger.debug(f'final use has shape {raster_use.shape}')
     return raster_use
@@ -360,6 +559,19 @@ def harmonize_use(use, res, study_area, like, tstep=None):
 
 
 def check_particle_file(path_to_file):
+    """
+    Sanity-check an OpenDrift output netcdf file for forcing variables that are all zero,
+    which usually indicates a reader/forcing problem rather than genuine zero forcing.
+
+    Checks the variables 'x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind' and
+    'y_wind', logging a debug warning for each one that is all zero across the whole
+    dataset, and a debug confirmation otherwise. Does not return anything.
+
+    Parameters
+    ----------
+    path_to_file : str or Path
+        Path to the OpenDrift output netcdf file to check.
+    """
     ds = xr.open_dataset(path_to_file)
     vars_to_check = ['x_sea_water_velocity', 'y_sea_water_velocity', 'x_wind', 'y_wind']
     for i in vars_to_check:
@@ -370,6 +582,30 @@ def check_particle_file(path_to_file):
 
 
 def traj_distinct(bin_n, weight):
+    """
+    Zero out weight at timesteps where a trajectory stays in the same spatial bin as the
+    previous timestep, keeping weight only at the first timestep of each new bin "visit" -
+    so a trajectory dwelling in one bin over several consecutive timesteps contributes
+    weight only once per visit, rather than once per timestep.
+
+    Meant to be applied per-trajectory along the time axis, e.g. via
+    xr.apply_ufunc(traj_distinct, ds.bin_n, weight, input_core_dims=[['time'],['time']],
+    output_core_dims=[['time']], vectorize=True).
+
+    Parameters
+    ----------
+    bin_n : array-like
+        1D array of bin ids for a single trajectory over time, in chronological order (e.g.
+        the 'bin_n' variable of a PMAR dataset, for one trajectory).
+    weight : array-like
+        Weight values for the same trajectory over time, same shape as bin_n.
+
+    Returns
+    -------
+    array-like
+        Copy of weight with entries at timestep t set to 0 whenever bin_n[t] == bin_n[t-1]
+        (the first timestep, t=0, is always kept as-is).
+    """
     logger.debug(f"bin_n: {bin_n.shape} | weight: {weight.shape}")
     w = deepcopy(weight)
     for t in range(1,len(bin_n)): # i leave the first element as 1, otherwise the loop would compare it to the last element.
