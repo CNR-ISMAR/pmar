@@ -45,7 +45,6 @@ SPATIAL_DOMAINS = {'global':
                  },
                  'extent': [-6, 30.19, 36.29, 45.98],
                 'label': 'CMEMS_Mediterranean_Renalysis'
-
                 },
 
                 'black sea':
@@ -58,7 +57,6 @@ SPATIAL_DOMAINS = {'global':
                  },
                 'extent': [27.25, 40.5, 42, 47],
                 'label': 'CMEMS_Black_Sea_Renalysis'
-
                 },
 
                 'baltic':
@@ -71,9 +69,9 @@ SPATIAL_DOMAINS = {'global':
                  },
                  'extent': [9.04, 53.01, 30.21, 65.89],
                 'label': 'CMEMS_Baltic_Sea_Renalysis'
-
                 }
-    }
+                                    
+                  }
 
 
 def get_copernicus(spatial_domain):
