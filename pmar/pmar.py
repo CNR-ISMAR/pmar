@@ -30,7 +30,7 @@ from rasterio.enums import Resampling
 #from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
-from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus, select_spatial_domain
 #from cmap import Colormap
 from pmar.plotting import plot_map
 from scipy.sparse import coo_array, diags
@@ -78,7 +78,7 @@ class PMAR(object):
     """
 
 
-    def __init__(self, spatial_domain='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10, log_to_file=False, _internal=False):
+    def __init__(self, spatial_domain='auto', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10, log_to_file=False, _internal=False):
         """
         Initialize a PMAR instance: set up output/cache directories, default state, logging,
         the pressure/OpenDrift module, and the spatial domain/readers.
@@ -90,7 +90,13 @@ class PMAR(object):
         Parameters
         ----------
         spatial_domain : str or list, optional
-            If str, an ocean basin for which CMEMS readers are available. Otherwise, a list of paths of files to be imported as OpenDrift readers. Default is 'global'
+            If str, an ocean basin for which CMEMS readers are available ('global', 'med',
+            'black sea' or 'baltic'), or 'auto' to defer basin selection until
+            get_trajectories() knows the seeding location (seed_within_bounds or
+            seeding_shapefile), at which point the basin(s) whose Copernicus Marine data
+            covers that seeding area are selected automatically (see
+            pmar.utils.select_spatial_domain). Otherwise, a list of paths of files to be
+            imported as OpenDrift readers. Default is 'global'
         readers : list, optional
             Local reader datasets/paths to add to OpenDrift directly (added as-is via
             o.add_reader), instead of readers derived from spatial_domain. Default is None.
@@ -185,8 +191,11 @@ class PMAR(object):
         self.set_pressure(pressure)
 
         # define spatial_domain
-        if spatial_domain is not None:
-            try: 
+        if spatial_domain == 'auto':
+            # resolved later in get_trajectories(), once the seeding location is known
+            self.spatial_domain = 'auto'
+        elif spatial_domain is not None:
+            try:
                 self.spatial_domain = get_copernicus(str(spatial_domain))
                 self.extent = self.spatial_domain['extent']
 
@@ -424,8 +433,13 @@ class PMAR(object):
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
         seeding_shapefile : str, optional
             Path to a shapefile containing geometries to seed within. Default is None,  i.e. the whole basin is covered.
+            If self.spatial_domain is 'auto', this (or seed_within_bounds) is required, and
+            its total_bounds is used to auto-select the covering Copernicus basin(s).
         seed_within_bounds : list, optional
-            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
+            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered.
+            If self.spatial_domain is 'auto', this (or seeding_shapefile) is required, and
+            is used to auto-select the covering Copernicus basin(s) (see
+            pmar.utils.select_spatial_domain).
         seed_from_file : str, optional
             Path to an OpenDrift output netcdf file to seed particles from (via seed_from_file()), e.g. to continue a previous simulation. Default is None.
         z : float, optional
@@ -460,11 +474,19 @@ class PMAR(object):
         #### SPATIAL DOMAIN
         # establish study area
         if seeding_shapefile is not None and seed_within_bounds is not None:
-             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
-            
+             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')
+
         if seed_within_bounds is None and seeding_shapefile is None:
+            if self.spatial_domain == 'auto':
+                raise ValueError("spatial_domain='auto' requires seed_within_bounds or seeding_shapefile to be given, since there is no seeding location to auto-detect a basin from.")
             seed_within_bounds = self.spatial_domain['extent']
-        
+
+        if self.spatial_domain == 'auto':
+            seeding_bounds = seed_within_bounds if seed_within_bounds is not None else gpd.read_file(seeding_shapefile).total_bounds
+            self.spatial_domain = select_spatial_domain(seeding_bounds)
+            self.extent = self.spatial_domain['extent']
+            logger.info(f"auto-selected spatial_domain: {self.spatial_domain['label']}")
+
         if seed_within_bounds is not None:
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
             q = self.basedir / 'polygons' / poly_path
