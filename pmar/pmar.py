@@ -1564,7 +1564,45 @@ class PMAR(object):
         
         self.disp_dist = disp_dist
         return disp_dist
+
+
+    def run_connectivity_analysis(self, node_name='index', self_loops=True, plot=False):
+        '''
+        node_name : a column in cm_grid to use as a label for the nodes in the network 
+        self_loops : whether self loops should be considered in the network and connectivity analysis
+        plot : whether to plot connectivity metrics
+        '''
+        cm = self.cm
+        cm_grid = self.cm_grid
+        
+        G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) 
+        
+        if node_name is 'index':
+            cm_grid = cm_grid.reset_index()
+            nx.set_node_attributes(G, values=cm_grid.index, name='ID')
+        else:
+            nx.set_node_attributes(G, values=cm_grid[str(node_name)], name=str(node_name))
     
+        if self_loops == False:
+            G.remove_edges_from(nx.selfloop_edges(G))
+            
+        coordinates = np.column_stack((cm_grid.geometry.centroid.x, cm_grid.geometry.centroid.y))
+    
+        connectivity_df = cm_grid[[str(node_name), 'geometry']]
+        
+        connectivity_df['in_strength'] = dict(G.in_degree(weight='p')).values()
+        connectivity_df['out_strength'] = dict(G.out_degree(weight='p')).values()
+            
+        logprob = np.log(1/np.array(list(dict(nx.get_edge_attributes(G, 'p')).values()))) 
+        nx.set_edge_attributes(G, dict(zip(dict(nx.get_edge_attributes(G, 'p')).keys(), logprob)), 'p_dist') # why p_dist???
+        connectivity_df['betweenness'] = dict(nx.betweenness_centrality(G, weight='p_dist', endpoints=True)).values()
+    
+        if plot == True:
+            for col in connectivity_df.columns.drop([str(node_name),'geometry']):
+                fig, ax = plot_map()
+                connectivity_df.plot(column=col, ax=ax, zorder=1, legend=True, legend_kwds={'label': col})
+            
+        return connectivity_df
 
     def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
         '''
