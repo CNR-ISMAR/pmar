@@ -1612,8 +1612,12 @@ class PMAR(object):
             self.cm_grid's node_name and geometry columns, plus 'in_strength',
             'out_strength' and 'betweenness' for each cell.
         '''
-        cm = self.cm
-        cm_grid = self.cm_grid
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+            cm = self.cm.tocsr()[:-1,:-1] # exclude buffer 
+            cm_grid = self.cm_grid[:-1]
+        else:
+            cm = self.cm
+            cm_grid = self.cm_grid
         
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) 
         
@@ -1835,6 +1839,10 @@ class PMAR(object):
         self.node_names = node_names
         if cm is None:
             cm = self.cm
+
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+            cm = self.cm.tocsr()[:-1,:-1]
+            
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='weight', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges
         if node_names is not None:
             nx.set_node_attributes(G, values=node_names, name='node_name')
