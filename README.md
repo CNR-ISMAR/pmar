@@ -1,14 +1,6 @@
-# PMAR - Pressure models for MARine activities
-
-**PMAR** is a software package for the modelling of anthropogenic **pressures** caused by **human activities** at sea. 
-
-**Pressures** are substances which act as tracers and cause negative impacts when released in the marine environment. This may include marine litter, oil or other hazardous substances, chemicals, organic matter, etc.
-
-**Human activities** such as maritime transport, fishing, oil & gas extraction, aquaculture, and more, can cause the release of such substances, thus becoming pressure **sources**. 
+# PMAR - Particle-based Modelling and Analysis for MARine Decision Support
 
 PMAR is open source and is programmed in Python. Particle trajectories are modelled using [OpenDrift](https://opendrift.github.io/). 
-
-![Alt text](/images/pmar_intro.png)
 
 # Installation
 
