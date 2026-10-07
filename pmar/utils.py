@@ -21,12 +21,15 @@ from geocube.vector import vectorize
 import requests
 import xml.etree.ElementTree as ET
 import tempfile
+import re
+from concurrent.futures import ThreadPoolExecutor
 from owslib.wfs import WebFeatureService
 
 logger = logging.getLogger('pmar')
 
 EMODNET_HA_WFS_URL = 'https://ows.emodnet-humanactivities.eu/wfs'
 EMODNET_HA_WCS_URL = 'https://ows.emodnet-humanactivities.eu/wcs'
+EMODNET_HITS_WORKERS = 20  # concurrency for list_emodnet_uses' per-layer feature-count checks
 
 
 SPATIAL_DOMAINS = {'global':
@@ -448,6 +451,25 @@ def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
     return raster_data
 
 
+def _wfs_has_features(name, bbox, wfs_url):
+    """Check (via a cheap RESULTTYPE=hits request) whether a WFS layer has any features within bbox."""
+    bbox_str = f'{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]},EPSG:4326'
+    try:
+        resp = requests.get(wfs_url, params={
+            'SERVICE': 'WFS', 'REQUEST': 'GetFeature', 'VERSION': '2.0.0',
+            'TYPENAMES': name, 'BBOX': bbox_str, 'RESULTTYPE': 'hits',
+        }, timeout=30)
+        resp.raise_for_status()
+        match = re.search(r'numberMatched="(\d+)"', resp.text)
+        if match is None:
+            logger.warning(f"could not parse feature count for '{name}'; keeping it in the list.")
+            return True
+        return int(match.group(1)) > 0
+    except requests.RequestException as e:
+        logger.warning(f"feature-count check failed for '{name}' ({e}); keeping it in the list.")
+        return True
+
+
 def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_URL):
     """
     List EMODnet Human Activities datasets ("uses") available within a bounding box.
@@ -458,6 +480,16 @@ def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_U
     every layer/coverage whose declared extent intersects bbox. Prints the result as a
     table (name, title, service, output_type) and also returns it, so a name can be passed
     directly to get_emodnet_use().
+
+    WFS layers are further verified with a live feature-count check (RESULTTYPE=hits,
+    run concurrently across candidates): some WFS layers -- mostly non-geographic
+    "Advisory Council" governance layers (e.g. 'emodnet:blacksea', 'emodnet:baltic') --
+    declare an inaccurate, world-spanning bounding box in GetCapabilities rather than
+    their real features' extent, which would otherwise make them appear for any bbox.
+    This adds a few seconds to the call but keeps the listing accurate. WCS coverages are
+    not verified this way (their declared bbox is computed by the server directly from
+    the real raster extent, so this particular issue doesn't apply, and checking actual
+    coverage content would require fetching the raster data itself).
 
     Parameters
     ----------
@@ -478,11 +510,16 @@ def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_U
     rows = []
 
     wfs = WebFeatureService(wfs_url, version='2.0.0')
+    wfs_candidates = []
     for name, layer in wfs.contents.items():
         if layer.boundingBoxWGS84 is None:
             continue
         if box(*layer.boundingBoxWGS84).intersects(bbox_poly):
-            rows.append({'name': name, 'title': layer.title, 'service': 'WFS', 'output_type': 'vector'})
+            wfs_candidates.append({'name': name, 'title': layer.title, 'service': 'WFS', 'output_type': 'vector'})
+
+    with ThreadPoolExecutor(max_workers=EMODNET_HITS_WORKERS) as executor:
+        has_features = list(executor.map(lambda c: _wfs_has_features(c['name'], bbox, wfs_url), wfs_candidates))
+    rows.extend(c for c, keep in zip(wfs_candidates, has_features) if keep)
 
     # owslib's WCS 2.0.1 CoverageSummary parsing doesn't populate title/bbox for this
     # server, so GetCapabilities is parsed directly here instead.
@@ -533,11 +570,14 @@ def get_emodnet_use(use_name, bbox, time=None, wfs_url=EMODNET_HA_WFS_URL, wcs_u
     Returns
     -------
     geopandas.GeoDataFrame or xarray.DataArray
-        For a WFS layer, the raw clipped GeoDataFrame (all of its original columns --
-        get_ppi()/harmonize_use() expect a 'use' GeoDataFrame with exactly one non-geometry
-        column, so select/derive one before passing this on, e.g.
-        gdf[['permitted_amount_t', 'geometry']]). For a WCS coverage, a 2D xarray.DataArray
-        in EPSG:4326 (fill values masked to NaN), ready to pass directly as 'use'.
+        For a WFS layer, a GeoDataFrame in EPSG:4326 with geometries clipped to bbox (not
+        just features selected by intersecting it -- large-extent features, e.g. fishing
+        quota zones, are cut down to bbox rather than returned whole), keeping all of the
+        layer's original columns. get_ppi()/harmonize_use() expect a 'use' GeoDataFrame
+        with exactly one non-geometry column, so select/derive one before passing this on,
+        e.g. gdf[['permitted_amount_t', 'geometry']]. For a WCS coverage, a 2D
+        xarray.DataArray in EPSG:4326 (fill values masked to NaN), ready to pass directly
+        as 'use'.
 
     Raises
     ------
@@ -559,17 +599,26 @@ def get_emodnet_use(use_name, bbox, time=None, wfs_url=EMODNET_HA_WFS_URL, wcs_u
     if service == 'wfs':
         bbox_str = f'{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]},EPSG:4326'
         url = (f'{wfs_url}?SERVICE=WFS&REQUEST=GetFeature&VERSION=2.0.0'
-               f'&TYPENAMES={use_name}&BBOX={bbox_str}&OUTPUTFORMAT=json')
+               f'&TYPENAMES={use_name}&BBOX={bbox_str}&SRSNAME=EPSG:4326&OUTPUTFORMAT=json')
         gdf = gpd.read_file(url)
+        if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs('EPSG:4326')
+
         if gdf.empty:
             logger.warning(f"No features found for '{use_name}' within bbox {bbox}.")
-        else:
-            value_cols = [c for c in gdf.columns if c != 'geometry']
-            logger.info(
-                f"fetched {len(gdf)} features for '{use_name}'. Non-geometry columns: "
-                f"{value_cols}. Select/derive a single value column before passing this as "
-                "use= to get_ppi()/harmonize_use()."
-            )
+            return gdf
+
+        # BBOX only selects features that *intersect* bbox -- it returns each feature's
+        # whole geometry, which for large-extent features (e.g. fishing/quota management
+        # zones) can extend far outside bbox. Clip to actually cut geometries down to it.
+        gdf = gdf.clip(box(*bbox)).reset_index(drop=True)
+
+        value_cols = [c for c in gdf.columns if c != 'geometry']
+        logger.info(
+            f"fetched {len(gdf)} features for '{use_name}'. Non-geometry columns: "
+            f"{value_cols}. Select/derive a single value column before passing this as "
+            "use= to get_ppi()/harmonize_use()."
+        )
         return gdf
 
     # service == 'wcs'
@@ -587,6 +636,7 @@ def get_emodnet_use(use_name, bbox, time=None, wfs_url=EMODNET_HA_WFS_URL, wcs_u
         ('SERVICE', 'WCS'), ('REQUEST', 'GetCoverage'), ('VERSION', '2.0.1'),
         ('COVERAGEID', use_name), ('FORMAT', 'image/tiff'),
         ('SUBSETTINGCRS', 'http://www.opengis.net/def/crs/EPSG/0/4326'),
+        ('OUTPUTCRS', 'http://www.opengis.net/def/crs/EPSG/0/4326'),
         ('SUBSET', f'Long({bbox[0]},{bbox[2]})'),
         ('SUBSET', f'Lat({bbox[1]},{bbox[3]})'),
     ]
@@ -605,6 +655,9 @@ def get_emodnet_use(use_name, bbox, time=None, wfs_url=EMODNET_HA_WFS_URL, wcs_u
         tmp.flush()
         da = rxr.open_rasterio(tmp.name, masked=True).squeeze()
         da.load()  # force read into memory before the temp file is deleted
+
+    if da.rio.crs is not None and da.rio.crs.to_epsg() != 4326:
+        da = da.rio.reproject('EPSG:4326')
 
     return da
 
