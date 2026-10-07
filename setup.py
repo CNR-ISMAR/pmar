@@ -24,5 +24,5 @@ setup(
     packages=['pmar',],
     include_package_data=True,
     zip_safe=False,
-    install_requires=['rioxarray', 'geopandas', 'seaborn', 'pydap']
+    install_requires=['rioxarray', 'geopandas', 'seaborn', 'pydap', 'owslib', 'requests']
 )

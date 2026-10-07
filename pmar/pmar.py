@@ -1566,18 +1566,43 @@ class PMAR(object):
         return disp_dist
 
 
-    def run_connectivity_analysis(self, node_name='index', self_loops=True, plot=False):
+    def connectivity_analysis(self, node_name='index', self_loops=True, plot=False):
         '''
-        node_name : a column in cm_grid to use as a label for the nodes in the network 
-        self_loops : whether self loops should be considered in the network and connectivity analysis
-        plot : whether to plot connectivity metrics
+        Compute per-cell network connectivity metrics from the connectivity matrix.
+
+        Builds a directed graph from self.cm with edge weight 'p' = transition probability and 
+        self.cm_grid's polygons as nodes.
+        Computes and plots, for each node: in-strength, out-strength and betweenness centrality.
+        Betweenness is computed on edge weights transformed as in Costa et al., (2017).
+
+        Requires self.cm and self.cm_grid to already be set (e.g. via get_cm()).
+
+        Parameters
+        ----------
+        node_name : str, optional
+            Column in self.cm_grid to use as each node's identifier/label, attached to the graph nodes and included in the returned GeoDataFrame.
+            Default is 'index', i.e. self.cm_grid's (reset) integer index is used instead,
+            stored as node attribute 'ID'.
+        self_loops : bool, optional
+            Whether to keep self-loop edges (a cell's probability of transitioning to
+            itself) when computing the degree/centrality metrics below. Default is True.
+        plot : bool, optional
+            If True, plot each computed metric ('in_strength', 'out_strength',
+            'betweenness') as a separate choropleth map via pmar.plotting.plot_map().
+            Default is False.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            self.cm_grid's node_name and geometry columns, plus 'in_strength',
+            'out_strength' and 'betweenness' for each cell.
         '''
         cm = self.cm
         cm_grid = self.cm_grid
         
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) 
         
-        if node_name is 'index':
+        if node_name == 'index':
             cm_grid = cm_grid.reset_index()
             nx.set_node_attributes(G, values=cm_grid.index, name='ID')
         else:
@@ -1594,13 +1619,14 @@ class PMAR(object):
         connectivity_df['out_strength'] = dict(G.out_degree(weight='p')).values()
             
         logprob = np.log(1/np.array(list(dict(nx.get_edge_attributes(G, 'p')).values()))) 
-        nx.set_edge_attributes(G, dict(zip(dict(nx.get_edge_attributes(G, 'p')).keys(), logprob)), 'p_dist') # why p_dist???
+        nx.set_edge_attributes(G, dict(zip(dict(nx.get_edge_attributes(G, 'p')).keys(), logprob)), 'p_dist') 
         connectivity_df['betweenness'] = dict(nx.betweenness_centrality(G, weight='p_dist', endpoints=True)).values()
     
         if plot == True:
             for col in connectivity_df.columns.drop([str(node_name),'geometry']):
                 fig, ax = plot_map()
-                connectivity_df.plot(column=col, ax=ax, zorder=1, legend=True, legend_kwds={'label': col})
+                connectivity_df.plot(column=col, ax=ax, zorder=1, legend=True)#, legend_kwds={'label': col})
+                ax.set_title(col)
             
         return connectivity_df
 

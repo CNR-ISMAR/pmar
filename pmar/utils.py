@@ -17,18 +17,24 @@ from rasterio.enums import MergeAlg
 import logging
 import matplotlib.pyplot as plt
 from pathlib import Path
-from geocube.vector import vectorize 
+from geocube.vector import vectorize
+import requests
+import xml.etree.ElementTree as ET
+import tempfile
+from owslib.wfs import WebFeatureService
 
 logger = logging.getLogger('pmar')
+
+EMODNET_HA_WFS_URL = 'https://ows.emodnet-humanactivities.eu/wfs'
+EMODNET_HA_WCS_URL = 'https://ows.emodnet-humanactivities.eu/wcs'
 
 
 SPATIAL_DOMAINS = {'global':
                 {'readers':
-                 {'currents': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
+                 {'physics': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
-                  #'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as currents
-                  #'mixed-layer': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # same as currents
-             #     'stokes': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
+                  #'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as physics
+                  'waves': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
               #    'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                  },
                 'extent': [-180, -80, 179.92, 90],
@@ -37,11 +43,10 @@ SPATIAL_DOMAINS = {'global':
 
                 'med':
                 {'readers':
-                 {'currents': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
+                 {'physics': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
                   'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
-                  'mixed-layer': 'cmems_mod_med_phy-mld_my_4.2km_P1D-m', # Mediterranean Sea Physics Reanalysis
-                  'stokes': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                  'waves': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
                  },
                  'extent': [-6, 30.19, 36.29, 45.98],
                 'label': 'CMEMS_Mediterranean_Renalysis'
@@ -49,11 +54,10 @@ SPATIAL_DOMAINS = {'global':
 
                 'black sea':
                 {'readers':
-                 {'currents': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
+                 {'physics': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
                   'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
-                  'mixed-layer': 'cmems_mod_blk_phy-mld_my_2.5km_P1D-m', # Black Sea Physics Reanalysis
-                  'stokes': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
+                  'waves': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
                  },
                 'extent': [27.25, 40.5, 42, 47],
                 'label': 'CMEMS_Black_Sea_Renalysis'
@@ -61,11 +65,10 @@ SPATIAL_DOMAINS = {'global':
 
                 'baltic':
                 {'readers':
-                 {'currents': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
+                 {'physics': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
                   'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
-                  'mixed-layer':'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
-                  'stokes': 'cmems_mod_bal_wav_my_PT1H-i',
+                  'waves': 'cmems_mod_bal_wav_my_PT1H-i',
                  },
                  'extent': [9.04, 53.01, 30.21, 65.89],
                 'label': 'CMEMS_Baltic_Sea_Renalysis'
@@ -196,81 +199,6 @@ def make_poly(bounds, crs='4326', save_to=None):
         #self.poly_path = str(q)
     return poly
 
-# unused (only reference elsewhere is commented out in pmar.py) - kept for reference
-# def _make_poly(lon, lat, crs='4326', save_to=None):
-#     """
-#     Creates shapely.Polygon where particles will be released homogeneously and writes it to a shapefile.
-#
-#     If lon and lat each have length 2, they are treated as [min, max] bounds and a single
-#     rectangular polygon is created. If they have length greater than 2, they are treated as
-#     coordinate arrays: a square buffer (of half the mean coordinate spacing) is built around
-#     every point of the lon/lat meshgrid, producing a GeoDataFrame of adjoining square cells.
-#
-#     Parameters
-#     ----------
-#     lon : list or array
-#         Either a list giving 2 bounds or an array of lon coordinates.
-#     lat : list or array
-#         Either a list giving 2 bounds or an array of lat coordinates.
-#     crs : str, optional
-#         EPSG code (without the 'EPSG:' prefix) that lon/lat are given in. Default is '4326'.
-#     save_to : str, optional
-#         Path to save the polygon(s) as an ESRI Shapefile. Default is None, i.e. not saved.
-#
-#     Returns
-#     -------
-#     geopandas.GeoDataFrame
-#         GeoDataFrame (reprojected to EPSG:4326) containing either the single rectangular
-#         polygon, or one square polygon per lon/lat grid point.
-#
-#     Raises
-#     ------
-#     ValueError
-#         If lon and lat do not both have length 2, and do not both have length greater than 2.
-#     """
-#
-#
-#     #Path(self.basedir / 'polygons').mkdir(parents=True, exist_ok=True)
-#     #poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(lon[0],4)}_{np.round(lon[1],4)}-lat—{np.round(lat[0],4)}_{np.round(lat[1])}.shp'
-#     #q = self.basedir / 'polygons' / poly_path
-#
-#     if len(np.array(lon)) == 2 and len(np.array(lat)) == 2:
-#         _df = pd.DataFrame() # create dataframe
-#         _df['lon'] = lon # add lon and lat arrays
-#         _df['lat'] = lat
-#         _df['geometry'] = Polygon(zip([lon[0],lon[0],lon[1],lon[1]], [lat[0],lat[1],lat[1],lat[0]]))
-#         poly = gpd.GeoDataFrame(_df, geometry="geometry").set_crs(epsg=crs).to_crs(epsg='4326') # transform into geodataframe
-#
-#     elif len(np.array(lon)) > 2 and len(np.array(lat)) > 2:
-#         x, y = np.meshgrid(lon, lat)
-#
-#         _df = pd.DataFrame() # create dataframe
-#         _df['lon'] = x.ravel() # add lon and lat arrays
-#
-#         _df['lat'] = y.ravel()
-#         _df['geometry'] = _df.apply(lambda r: Point(r.lon, r.lat), axis=1) # create point geometries
-#
-#         df = gpd.GeoDataFrame(_df, geometry="geometry") # transform into geodataframe
-#
-#         # buffer. cap_style = 3 means a square buffer. (creates square around centroid with distance 'res' between centroid and side)
-#         buffer = df['geometry'].buffer(np.diff(lon).mean()/2, cap_style = 3)
-#         # add buffered polygon to geo df
-#         df['squares'] = buffer
-#         gds = gpd.GeoDataFrame(df, geometry="squares")
-#         # create polygon by dissolving squares into each other
-#         #poly = gds.dissolve()
-#         # set crs and reproject to desired crs
-#         #poly = poly.set_crs(epsg=crs).to_crs(epsg='4326')
-#         poly = gds.set_crs(epsg=crs).to_crs(epsg='4326')
-#
-#     else:
-#         raise ValueError("'lon' and 'lat' must have length larger than 2")
-#
-#     if save_to is not None:
-#         poly.to_file(save_to, driver='ESRI Shapefile')
-#         #self.poly_path = str(q)
-#
-#     return poly
 
 def make_grid(res, study_area, crs='epsg:4326'):
     """
@@ -518,6 +446,167 @@ def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
         raster_data = raster_data.rio.reproject_match(like, resampling=Resampling.average)*cell_area
     
     return raster_data
+
+
+def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_URL):
+    """
+    List EMODnet Human Activities datasets ("uses") available within a bounding box.
+
+    Queries the EMODnet Human Activities WFS (vector datasets, e.g. aggregate extraction,
+    cables, aquaculture, wind farms) and WCS (raster datasets, currently vessel density and
+    route density, at various ship types/time periods) GetCapabilities documents, and lists
+    every layer/coverage whose declared extent intersects bbox. Prints the result as a
+    table (name, title, service, output_type) and also returns it, so a name can be passed
+    directly to get_emodnet_use().
+
+    Parameters
+    ----------
+    bbox : list or array-like
+        Bounding box to search within, as [xmin, ymin, xmax, ymax] in EPSG:4326.
+    wfs_url : str, optional
+        EMODnet Human Activities WFS endpoint. Default is EMODNET_HA_WFS_URL.
+    wcs_url : str, optional
+        EMODnet Human Activities WCS endpoint. Default is EMODNET_HA_WCS_URL.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: 'name' (pass this to get_emodnet_use()), 'title', 'service' ('WFS' or 'WCS'),
+        'output_type' ('vector' or 'raster', i.e. what get_emodnet_use() will return).
+    """
+    bbox_poly = box(*bbox)
+    rows = []
+
+    wfs = WebFeatureService(wfs_url, version='2.0.0')
+    for name, layer in wfs.contents.items():
+        if layer.boundingBoxWGS84 is None:
+            continue
+        if box(*layer.boundingBoxWGS84).intersects(bbox_poly):
+            rows.append({'name': name, 'title': layer.title, 'service': 'WFS', 'output_type': 'vector'})
+
+    # owslib's WCS 2.0.1 CoverageSummary parsing doesn't populate title/bbox for this
+    # server, so GetCapabilities is parsed directly here instead.
+    resp = requests.get(wcs_url, params={'SERVICE': 'WCS', 'REQUEST': 'GetCapabilities', 'VERSION': '2.0.1'}, timeout=60)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    ns = {'wcs': 'http://www.opengis.net/wcs/2.0', 'ows': 'http://www.opengis.net/ows/2.0'}
+    for summary in root.findall('.//wcs:CoverageSummary', ns):
+        cid = summary.find('wcs:CoverageId', ns)
+        bbox_el = summary.find('ows:WGS84BoundingBox', ns)
+        if cid is None or bbox_el is None:
+            continue
+        lc = [float(v) for v in bbox_el.find('ows:LowerCorner', ns).text.split()]
+        uc = [float(v) for v in bbox_el.find('ows:UpperCorner', ns).text.split()]
+        if box(lc[0], lc[1], uc[0], uc[1]).intersects(bbox_poly):
+            title = summary.find('ows:Title', ns)
+            rows.append({'name': cid.text, 'title': title.text if title is not None else cid.text, 'service': 'WCS', 'output_type': 'raster'})
+
+    uses = pd.DataFrame(rows, columns=['name', 'title', 'service', 'output_type']).sort_values(['service', 'title']).reset_index(drop=True)
+    print(uses.to_string(index=False))
+    return uses
+
+
+def get_emodnet_use(use_name, bbox, time=None, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_URL):
+    """
+    Fetch an EMODnet Human Activities dataset ("use"), clipped to a bounding box.
+
+    use_name is matched against WFS layer names (e.g. 'emodnet:aggregates') or WCS
+    coverage ids (e.g. 'emodnet__vesseldensity_00avg') by their naming convention (':' for
+    WFS, '__' for WCS) -- see list_emodnet_uses(bbox) for exact names to use.
+
+    Parameters
+    ----------
+    use_name : str
+        Exact WFS layer name or WCS coverage id, as returned by list_emodnet_uses().
+    bbox : list or array-like
+        Bounding box to clip the dataset to, as [xmin, ymin, xmax, ymax] in EPSG:4326.
+    time : str, optional
+        For time-dimensioned WCS coverages (e.g. vessel/route density), an ISO timestamp
+        (as listed in the coverage's time positions) to request. Default is None, i.e. the
+        coverage's own default time position (usually the most recent). Ignored for WFS
+        layers.
+    wfs_url : str, optional
+        EMODnet Human Activities WFS endpoint. Default is EMODNET_HA_WFS_URL.
+    wcs_url : str, optional
+        EMODnet Human Activities WCS endpoint. Default is EMODNET_HA_WCS_URL.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame or xarray.DataArray
+        For a WFS layer, the raw clipped GeoDataFrame (all of its original columns --
+        get_ppi()/harmonize_use() expect a 'use' GeoDataFrame with exactly one non-geometry
+        column, so select/derive one before passing this on, e.g.
+        gdf[['permitted_amount_t', 'geometry']]). For a WCS coverage, a 2D xarray.DataArray
+        in EPSG:4326 (fill values masked to NaN), ready to pass directly as 'use'.
+
+    Raises
+    ------
+    ValueError
+        If use_name's service can't be determined from its naming convention, or if the
+        EMODnet server returns an error (e.g. an unknown name/id, or an invalid time).
+    """
+    if '__' in use_name:
+        service = 'wcs'
+    elif ':' in use_name:
+        service = 'wfs'
+    else:
+        raise ValueError(
+            f"Could not tell whether '{use_name}' is a WFS layer (name like 'emodnet:xxx') "
+            "or a WCS coverage (id like 'emodnet__xxx'). Use the exact name/id returned by "
+            "list_emodnet_uses()."
+        )
+
+    if service == 'wfs':
+        bbox_str = f'{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]},EPSG:4326'
+        url = (f'{wfs_url}?SERVICE=WFS&REQUEST=GetFeature&VERSION=2.0.0'
+               f'&TYPENAMES={use_name}&BBOX={bbox_str}&OUTPUTFORMAT=json')
+        gdf = gpd.read_file(url)
+        if gdf.empty:
+            logger.warning(f"No features found for '{use_name}' within bbox {bbox}.")
+        else:
+            value_cols = [c for c in gdf.columns if c != 'geometry']
+            logger.info(
+                f"fetched {len(gdf)} features for '{use_name}'. Non-geometry columns: "
+                f"{value_cols}. Select/derive a single value column before passing this as "
+                "use= to get_ppi()/harmonize_use()."
+            )
+        return gdf
+
+    # service == 'wcs'
+    describe_resp = requests.get(wcs_url, params={
+        'SERVICE': 'WCS', 'REQUEST': 'DescribeCoverage', 'VERSION': '2.0.1', 'COVERAGEID': use_name,
+    }, timeout=60)
+    describe_resp.raise_for_status()
+    describe_root = ET.fromstring(describe_resp.content)
+    time_domain = describe_root.find('.//{http://www.geoserver.org/wcsgs/2.0}TimeDomain')
+    subset_time = None
+    if time_domain is not None:
+        subset_time = time if time is not None else time_domain.get('default')
+
+    params = [
+        ('SERVICE', 'WCS'), ('REQUEST', 'GetCoverage'), ('VERSION', '2.0.1'),
+        ('COVERAGEID', use_name), ('FORMAT', 'image/tiff'),
+        ('SUBSETTINGCRS', 'http://www.opengis.net/def/crs/EPSG/0/4326'),
+        ('SUBSET', f'Long({bbox[0]},{bbox[2]})'),
+        ('SUBSET', f'Lat({bbox[1]},{bbox[3]})'),
+    ]
+    if subset_time is not None:
+        params.append(('SUBSET', f'time("{subset_time}")'))
+
+    resp = requests.get(wcs_url, params=params, timeout=120)
+    resp.raise_for_status()
+    if resp.content[:5] == b'<?xml':
+        root = ET.fromstring(resp.content)
+        msg = ' '.join(root.itertext()).strip()
+        raise ValueError(f"EMODnet WCS request for '{use_name}' failed: {msg}")
+
+    with tempfile.NamedTemporaryFile(suffix='.tif') as tmp:
+        tmp.write(resp.content)
+        tmp.flush()
+        da = rxr.open_rasterio(tmp.name, masked=True).squeeze()
+        da.load()  # force read into memory before the temp file is deleted
+
+    return da
 
 
 def harmonize_use(use, res, study_area, like, tstep=None):
