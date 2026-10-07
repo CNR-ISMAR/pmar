@@ -1,5 +1,5 @@
 # fix these by using plot_map
-# add plot_origin, plot_destination, plot_network, plot_CM
+# add plot_origin, plot_destination, plot_network, plot_cm
 import cartopy
 import numpy as np
 from matplotlib.ticker import LogFormatter, PercentFormatter

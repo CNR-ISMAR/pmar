@@ -30,7 +30,7 @@ from rasterio.enums import Resampling
 #from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
-from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus, select_spatial_domain, get_emodnet_use
 #from cmap import Colormap
 from pmar.plotting import plot_map
 from scipy.sparse import coo_array, diags
@@ -61,7 +61,7 @@ class PMAR(object):
         Regular spatial grid (cell edges/centers, bin indices) used for rasterization.
     cm_grid : geopandas.GeoDataFrame or None
         Vector (polygon) version of grid, used for connectivity matrix calculations.
-    CM / Pij : scipy.sparse array or None
+    cm : scipy.sparse array or None
         Connectivity matrix between polygons in cm_grid.
     output : xr.Dataset or None
         Computed rasterized outputs (e.g. 'ppi', 'SUM', 'MAX', quantile indicators).
@@ -73,24 +73,30 @@ class PMAR(object):
     Methods
     -------
     See method docstrings below for the full pipeline: get_trajectories/import_trajectories,
-    get_ppi/get_indicators, get_Pij/get_Nij/predict_with_CM, and run() as the top-level
+    get_ppi/get_indicators, get_cm/get_Nij/predict_with_cm, and run() as the top-level
     single-seeding pipeline (get_trajectories -> get_ppi -> get_indicators).
     """
 
 
-    def __init__(self, spatial_domain='global', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10, log_to_file=False, _internal=False):
+    def __init__(self, spatial_domain='auto', readers=None, reader_type=None, pressure='generic', chemical_compound=None, basedir='pmar_output', localdatadir = None, particle_path=None, netrppi_path=None, loglevel=10, log_to_file=False, _internal=False):
         """
         Initialize a PMAR instance: set up output/cache directories, default state, logging,
         the pressure/OpenDrift module, and the spatial domain/readers.
 
-        `_internal` is for internal use only (see PMARmulti.get_ppi/get_Pij's `temp_self`): when
+        `_internal` is for internal use only (see PMARmulti.get_ppi/get_cm's `temp_self`): when
         True, this call skips (re)configuring the shared module logger entirely, so a nested
         helper PMAR instance never clobbers the outer/real instance's log handlers or level.
 
         Parameters
         ----------
         spatial_domain : str or list, optional
-            If str, an ocean basin for which CMEMS readers are available. Otherwise, a list of paths of files to be imported as OpenDrift readers. Default is 'global'
+            If str, an ocean basin for which CMEMS readers are available ('global', 'med',
+            'black sea' or 'baltic'), or 'auto' to defer basin selection until
+            get_trajectories() knows the seeding location (seed_within_bounds or
+            seeding_shapefile), at which point the basin(s) whose Copernicus Marine data
+            covers that seeding area are selected automatically (see
+            pmar.utils.select_spatial_domain). Otherwise, a list of paths of files to be
+            imported as OpenDrift readers. Default is 'global'
         readers : list, optional
             Local reader datasets/paths to add to OpenDrift directly (added as-is via
             o.add_reader), instead of readers derived from spatial_domain. Default is None.
@@ -185,8 +191,11 @@ class PMAR(object):
         self.set_pressure(pressure)
 
         # define spatial_domain
-        if spatial_domain is not None:
-            try: 
+        if spatial_domain == 'auto':
+            # resolved later in get_trajectories(), once the seeding location is known
+            self.spatial_domain = 'auto'
+        elif spatial_domain is not None:
+            try:
                 self.spatial_domain = get_copernicus(str(spatial_domain))
                 self.extent = self.spatial_domain['extent']
 
@@ -424,8 +433,13 @@ class PMAR(object):
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
         seeding_shapefile : str, optional
             Path to a shapefile containing geometries to seed within. Default is None,  i.e. the whole basin is covered.
+            If self.spatial_domain is 'auto', this (or seed_within_bounds) is required, and
+            its total_bounds is used to auto-select the covering Copernicus basin(s).
         seed_within_bounds : list, optional
-            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered
+            Spatial bounds for seeding written as bounds=[x1,y1,x2,y2]. Default is None, i.e. the whole basin is covered.
+            If self.spatial_domain is 'auto', this (or seeding_shapefile) is required, and
+            is used to auto-select the covering Copernicus basin(s) (see
+            pmar.utils.select_spatial_domain).
         seed_from_file : str, optional
             Path to an OpenDrift output netcdf file to seed particles from (via seed_from_file()), e.g. to continue a previous simulation. Default is None.
         z : float, optional
@@ -460,11 +474,19 @@ class PMAR(object):
         #### SPATIAL DOMAIN
         # establish study area
         if seeding_shapefile is not None and seed_within_bounds is not None:
-             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')        
-            
+             raise ValueError('Please provide either seeding_shapefile or seed_within_bounds, not both.')
+
         if seed_within_bounds is None and seeding_shapefile is None:
+            if self.spatial_domain == 'auto':
+                raise ValueError("spatial_domain='auto' requires seed_within_bounds or seeding_shapefile to be given, since there is no seeding location to auto-detect a basin from.")
             seed_within_bounds = self.spatial_domain['extent']
-        
+
+        if self.spatial_domain == 'auto':
+            seeding_bounds = seed_within_bounds if seed_within_bounds is not None else gpd.read_file(seeding_shapefile).total_bounds
+            self.spatial_domain = select_spatial_domain(seeding_bounds)
+            self.extent = self.spatial_domain['extent']
+            logger.info(f"auto-selected spatial_domain: {self.spatial_domain['label']}")
+
         if seed_within_bounds is not None:
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
             q = self.basedir / 'polygons' / poly_path
@@ -578,7 +600,7 @@ class PMAR(object):
             #reader_landmask = reader_shape.Reader.from_shpfiles(shpfilename)
             
             #self.o.add_reader([reader_landmask])
-            self.o.set_config('general:use_auto_landmask', True)  # Disabling the automatic GSHHG landmask
+            self.o.set_config('general:use_auto_landmask', True)  # False disables the automatic GSHHG landmask
             
             logger.info('adding readers...')            
             
@@ -874,9 +896,15 @@ class PMAR(object):
 
     def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=True):
         '''
-        Associate weights with each trajectory. 
+        Associate weights with each trajectory.
         ORDER OF OPERATIONS MATTERS.
-        Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).  
+        Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).
+        use may also be given as a string, in which case it is treated as an EMODnet
+        Human Activities dataset identifier (as returned by pmar.utils.list_emodnet_uses())
+        and fetched via pmar.utils.get_emodnet_use(use, bbox=study_area) before being
+        passed on to harmonize_use(); this requires study_area (or self.study_area) to be
+        set, and raises ValueError if the identifier isn't recognised or returns no data
+        within study_area.
         '''
         
             
@@ -895,6 +923,15 @@ class PMAR(object):
             logger.warning(weight.shape)
 
         if use is not None:
+            if isinstance(use, str):
+                if study_area is None:
+                    raise ValueError(f"use='{use}' is an EMODnet dataset identifier, which requires study_area (or self.study_area) to be set, to know where to fetch it from.")
+                use_name = use
+                logger.info(f"use is a string; fetching '{use_name}' from EMODnet Human Activities within study_area {study_area}...")
+                use = get_emodnet_use(use_name, bbox=study_area)
+                use_empty = use.empty if hasattr(use, 'empty') else bool(np.isnan(use).all())
+                if use_empty:
+                    raise ValueError(f"EMODnet dataset '{use_name}' returned no data within study_area {study_area}.")
             use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}))#, tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
             self.use = use
             use_value = self.use_by_traj(use=self.use, res=res, study_area=study_area).broadcast_like(self.ds.lon)
@@ -1256,7 +1293,7 @@ class PMAR(object):
             Adjacency matrix of particle counts from cell i at t=0 to cell j at t.
         Ni0 : numpy.ndarray
             Number of particles actually found in each cell i at t=0 (A0.sum(1)). Exposed
-            so get_Pij can normalize rows by the true departing cohort of each cell rather
+            so get_cm can normalize rows by the true departing cohort of each cell rather
             than by Nij's own row-sum, which undercounts whenever particles leave cm_grid
             entirely by time t and are therefore absent from every destination column.
         """
@@ -1271,10 +1308,11 @@ class PMAR(object):
         Ni0 = np.asarray(A0.sum(1)).ravel()
         return Nij_sparse, Ni0
 
-    def get_Pij(self, t=-1, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
+    def get_cm(self, t=-1, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
         """
-        Calculate Markov transition matrix Pij by normalizing each row i of adjacency matrix Nij
-        by Ni, i.e. the actual number of particles found in cell i at t=0.
+        Calculate the connectivity matrix (cm): the Markov transition matrix obtained by
+        normalizing each row i of adjacency matrix Nij by Ni, i.e. the actual number of
+        particles found in cell i at t=0.
         Entries of this matrix contain the probability of going from cell i to cell j after exactly t timesteps from t0.
         Rows only sum to 1 if every particle found in cell i at t=0 is still found somewhere in
         cm_grid (domain + buffer, if used) at time t; particles that leave cm_grid entirely by
@@ -1285,35 +1323,32 @@ class PMAR(object):
         cell j, so particles that leak out of the tracked domain into the buffer are considered
         permanently gone from the system rather than being able to transition back.
         """
-        # Nij = self.get_Nij(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
-        # Ni = np.asarray(Nij.sum(1)).ravel() # normalized by Nij's own row-sum: undercounts particles lost from tracking by time t
         Nij, Ni = self.get_Nij(t=t, cm_grid=cm_grid, res=res, study_area=study_area, buffer=buffer, weighted=weighted)
-        Pij = np.zeros_like(Ni, dtype=float)
+        cm = np.zeros_like(Ni, dtype=float)
         # mask to avoid division by 0
         mask = Ni != 0
         # divide Nij by Ni, i.e. number of particles coming from cell i
-        Pij[mask] = 1.0 / Ni[mask]
-        Pij_sparse = diags(Pij) @ Nij # matrix multipli Nij with diagonal matrix with reciprocal of Ni
+        cm[mask] = 1.0 / Ni[mask]
+        cm_sparse = diags(cm) @ Nij # matrix multipli Nij with diagonal matrix with reciprocal of Ni
 
         if buffer is not None:
             # buffer cell is always the last row of cm_grid (see get_particles_by_cell); make it absorbing
-            buffer_idx = Pij_sparse.shape[0] - 1
-            Pij_sparse = Pij_sparse.tolil()
-            Pij_sparse[buffer_idx, :] = 0
-            Pij_sparse[buffer_idx, buffer_idx] = 1
-            Pij_sparse = Pij_sparse.tocsr()
+            buffer_idx = cm_sparse.shape[0] - 1
+            cm_sparse = cm_sparse.tolil()
+            cm_sparse[buffer_idx, :] = 0
+            cm_sparse[buffer_idx, buffer_idx] = 1
+            cm_sparse = cm_sparse.tocsr()
 
-        self.Pij = Pij_sparse
         if filename is not None:
-            mmwrite(filename, Pij_sparse)
+            mmwrite(filename, cm_sparse)
             logger.info(f'wrote file {filename}')
 
-        self.CM = Pij_sparse
-        return Pij_sparse
+        self.cm = cm_sparse
+        return cm_sparse
 
-    def get_Pij_within_range(self, t_max, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
+    def get_cm_within_range(self, t_max, cm_grid=None, res=None, study_area=None, weighted=False, buffer=None, filename=None):
         """
-        Calculate Lagrangian connectivity matrix containing the probability of passing through cell j from cell i within t_max timesteps, starting from t=0.
+        Calculate the Lagrangian connectivity matrix (cm) containing the probability of passing through cell j from cell i within t_max timesteps, starting from t=0.
 
         If buffer is given, the buffer cell (last row of cm_grid, appended by get_particles_by_cell) is forced
         into an absorbing state: P(buffer -> buffer) = 1 and P(buffer -> j) = 0 for every other
@@ -1337,30 +1372,30 @@ class PMAR(object):
         At = self._ll_to_indicator(llt, n_cells, n_traj)
         Nij = A0 @ At.T
         Ni0 = np.asarray(A0.sum(1)).ravel()
-        Pij = np.zeros_like(Ni0, dtype=float)
+        cm = np.zeros_like(Ni0, dtype=float)
         mask = Ni0 != 0
-        Pij[mask] = 1.0 / Ni0[mask]
-        Pij_sparse = coo_array(diags(Pij) @ Nij)
+        cm[mask] = 1.0 / Ni0[mask]
+        cm_sparse = coo_array(diags(cm) @ Nij)
 
         if buffer is not None:
             # buffer cell is always the last row of cm_grid (see get_particles_by_cell); make it absorbing
-            buffer_idx = Pij_sparse.shape[0] - 1
-            Pij_sparse = Pij_sparse.tolil()
-            Pij_sparse[buffer_idx, :] = 0
-            Pij_sparse[buffer_idx, buffer_idx] = 1
-            Pij_sparse = coo_array(Pij_sparse)
+            buffer_idx = cm_sparse.shape[0] - 1
+            cm_sparse = cm_sparse.tolil()
+            cm_sparse[buffer_idx, :] = 0
+            cm_sparse[buffer_idx, buffer_idx] = 1
+            cm_sparse = coo_array(cm_sparse)
 
         if filename is not None:
-            mmwrite(filename, Pij_sparse)
+            mmwrite(filename, cm_sparse)
             logger.info(f'wrote file {filename}')
 
-        return Pij_sparse
+        return cm_sparse
 
 
     
     def _get_Pij(self, t=-1, cm_grid=None, res=None, study_area=None, buffer=None, filename=None, weighted=False):
         """
-        Legacy/alternate implementation of get_Pij: calculate the Markov transition matrix
+        Legacy/alternate implementation of get_cm: calculate the Markov transition matrix
         Pij by normalizing the adjacency matrix Nij (co-occurrence of trajectories in cell i
         at t=0 and cell j at t) by Ni, the number of particles coming from cell i.
 
@@ -1481,9 +1516,9 @@ class PMAR(object):
         return Pji_sparse
     
 
-    def plot_CM(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap='Greys', mask=None):
+    def plot_cm(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap='Greys', mask=None):
         """
-        Plot self.CM (densified) as a matrix heatmap.
+        Plot self.cm (densified) as a matrix heatmap.
 
         Parameters
         ----------
@@ -1507,35 +1542,35 @@ class PMAR(object):
         # use cm_grid for tick_labels
         from pmar.plotting import plot_matrix
         import matplotlib.pyplot as plt
-        CM = self.CM.toarray() # my CM is now by default a sparse array. to plot it, must convert it to a dense array
+        cm = self.cm.toarray() # my cm is now by default a sparse array. to plot it, must convert it to a dense array
 
         if mask is not None:
-            mask = CM<=mask
+            mask = cm<=mask
 
         if annot == True:
-            CM = np.round(CM,2)
+            cm = np.round(cm,2)
 
         fig, ax = plt.subplots(figsize=figsize)
-        plot_matrix(CM, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask, ax=ax)
+        plot_matrix(cm, tick_labels=tick_labels, annot=annot, linewidths=linewidths, vmin=vmin, vmax=vmax, norm=norm, cmap=cmap, mask=mask, ax=ax)
 
-    def dispersal_distance(self, CM=None, cm_grid=None):
+    def dispersal_distance(self, cm=None, cm_grid=None):
         '''
         "as the crow flies" dispersal distance from connectiviy matrix
         '''
         if cm_grid is None:
             cm_grid = self.cm_grid
 
-        if CM is None:
-            CM = self.CM
-            
+        if cm is None:
+            cm = self.cm
+
         cm_grid = cm_grid.to_crs(32601)
-        
+
         disp_dist = np.zeros(len(cm_grid))
         for i in range(len(cm_grid)):
-            CM_row = CM.tocsr()[i,:] # convert to scipy.csr so i can index by row
-            if CM_row.sum()>0:
+            cm_row = cm.tocsr()[i,:] # convert to scipy.csr so i can index by row
+            if cm_row.sum()>0:
                 D_col = np.array([cm_grid.geometry.centroid.iloc[i].distance(cm_grid.geometry.centroid.iloc[j])*1e-3 for j in range(len(cm_grid))])
-                disp_dist[i] = CM_row@D_col
+                disp_dist[i] = cm_row@D_col
             else:
                 disp_dist[i] = np.nan
 
@@ -1544,7 +1579,75 @@ class PMAR(object):
         
         self.disp_dist = disp_dist
         return disp_dist
+
+
+    def connectivity_analysis(self, node_name='index', self_loops=True, plot=False):
+        '''
+        Compute per-cell network connectivity metrics from the connectivity matrix.
+
+        Builds a directed graph from self.cm with edge weight 'p' = transition probability and 
+        self.cm_grid's polygons as nodes.
+        Computes and plots, for each node: in-strength, out-strength and betweenness centrality.
+        Betweenness is computed on edge weights transformed as in Costa et al., (2017).
+
+        Requires self.cm and self.cm_grid to already be set (e.g. via get_cm()).
+
+        Parameters
+        ----------
+        node_name : str, optional
+            Column in self.cm_grid to use as each node's identifier/label, attached to the graph nodes and included in the returned GeoDataFrame.
+            Default is 'index', i.e. self.cm_grid's (reset) integer index is used instead,
+            stored as node attribute 'ID'.
+        self_loops : bool, optional
+            Whether to keep self-loop edges (a cell's probability of transitioning to
+            itself) when computing the degree/centrality metrics below. Default is True.
+        plot : bool, optional
+            If True, plot each computed metric ('in_strength', 'out_strength',
+            'betweenness') as a separate choropleth map via pmar.plotting.plot_map().
+            Default is False.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            self.cm_grid's node_name and geometry columns, plus 'in_strength',
+            'out_strength' and 'betweenness' for each cell.
+        '''
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+            cm = self.cm.tocsr()[:-1,:-1] # exclude buffer 
+            cm_grid = self.cm_grid[:-1]
+        else:
+            cm = self.cm
+            cm_grid = self.cm_grid
+        
+        G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) 
+        
+        if node_name == 'index':
+            cm_grid = cm_grid.reset_index()
+            nx.set_node_attributes(G, values=cm_grid.index, name='ID')
+        else:
+            nx.set_node_attributes(G, values=cm_grid[str(node_name)], name=str(node_name))
     
+        if self_loops == False:
+            G.remove_edges_from(nx.selfloop_edges(G))
+            
+        coordinates = np.column_stack((cm_grid.geometry.centroid.x, cm_grid.geometry.centroid.y))
+    
+        connectivity_df = cm_grid[[str(node_name), 'geometry']]
+        
+        connectivity_df['in_strength'] = dict(G.in_degree(weight='p')).values()
+        connectivity_df['out_strength'] = dict(G.out_degree(weight='p')).values()
+            
+        logprob = np.log(1/np.array(list(dict(nx.get_edge_attributes(G, 'p')).values()))) 
+        nx.set_edge_attributes(G, dict(zip(dict(nx.get_edge_attributes(G, 'p')).keys(), logprob)), 'p_dist') 
+        connectivity_df['betweenness'] = dict(nx.betweenness_centrality(G, weight='p_dist', endpoints=True)).values()
+    
+        if plot == True:
+            for col in connectivity_df.columns.drop([str(node_name),'geometry']):
+                fig, ax = plot_map()
+                connectivity_df.plot(column=col, ax=ax, zorder=1, legend=True)#, legend_kwds={'label': col})
+                ax.set_title(col)
+            
+        return connectivity_df
 
     def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
         '''
@@ -1592,11 +1695,11 @@ class PMAR(object):
         return cm_grid[f'destination_of_{origin_idx}']
 
 
-    def predict_with_CM(self, initial_condition, initial_condition_crs='epsg:4326', CM=None, k=None, sum=False):
+    def predict_with_cm(self, initial_condition, initial_condition_crs='epsg:4326', cm=None, k=None, sum=False):
         """Predict the probability distribution k Markov steps ahead of initial_condition.
 
-        Only works when CM is a grid covering the whole domain: if initial_condition has
-        shape (m,n), CM must have shape (mxn, mxn).
+        Only works when cm is a grid covering the whole domain: if initial_condition has
+        shape (m,n), cm must have shape (mxn, mxn).
 
         Parameters
         ----------
@@ -1604,8 +1707,8 @@ class PMAR(object):
             Initial probability/occupancy field, reprojected and matched onto self.grid.mask.
         initial_condition_crs : str
             CRS of initial_condition, default 'epsg:4326'.
-        CM : sparse array, optional
-            Connectivity/transition matrix to use; defaults to self.CM.
+        cm : sparse array, optional
+            Connectivity/transition matrix to use; defaults to self.cm.
         k : int, optional
             Number of Markov steps to propagate forward. If None, a single step is applied.
         sum : bool
@@ -1620,32 +1723,32 @@ class PMAR(object):
 
         Notes
         -----
-        The distribution is propagated incrementally as a vector (v <- v @ CM, k times,
-        accumulated when sum=True) rather than by forming the full matrix power CM**k via
-        matrix_power. CM itself never changes, so this avoids the sparsity fill-in that makes
+        The distribution is propagated incrementally as a vector (v <- v @ cm, k times,
+        accumulated when sum=True) rather than by forming the full matrix power cm**k via
+        matrix_power. cm itself never changes, so this avoids the sparsity fill-in that makes
         repeated squaring of a sparse matrix progressively denser (and slower) as k grows;
-        cost becomes O(k * nnz(CM)) instead of superlinear in k.
+        cost becomes O(k * nnz(cm)) instead of superlinear in k.
         """
-    # only works when CM is a grid covering the whole domain.
-    # if initial_condition has shape (m,n), the CM must have shape (mxn, mxn)
-        if CM is None:
-            CM = self.CM # my CM is now by default a sparse array
+    # only works when cm is a grid covering the whole domain.
+    # if initial_condition has shape (m,n), the cm must have shape (mxn, mxn)
+        if cm is None:
+            cm = self.cm # my cm is now by default a sparse array
 
         initial_condition = initial_condition.load().rio.set_crs(initial_condition_crs).rio.reproject_match(self.grid.mask).sortby('y').sortby('x').rename({'y':'y_c', 'x':'x_c'})
 
-        if initial_condition.data[~np.isnan(initial_condition.data)].shape[0] != CM.shape[0]:
-            logger.warning('initial_condition and CM dimensions do not match')#. clipping initial_condition to match cm_grid.')
+        if initial_condition.data[~np.isnan(initial_condition.data)].shape[0] != cm.shape[0]:
+            logger.warning('initial_condition and cm dimensions do not match')#. clipping initial_condition to match cm_grid.')
             #initial_condition = initial_condition.rio.clip(self.cm_grid[self.cm_grid[list(self.cm_grid.columns.drop('geometry'))[0]] >=0].geometry, self.cm_grid.geometry.crs, drop=False, all_touched=True)
             initial_condition = initial_condition.where(initial_condition>=0)
             initial_condition = initial_condition.where(self.grid.mask>0)
         else:
-            logger.info('initial_condition and CM dimensions match.')
-        
-        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')        
+            logger.info('initial_condition and cm dimensions match.')
+
+        initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')
         print(initial_condition_stack.shape)
-        
+
         ## this would be for the case where an extra node was added to denote "everywhere else" outside of cm_grid.
-        ## but unstack obviously does not work, so can't return a datarray in lon, lat. only a sparse matrix. 
+        ## but unstack obviously does not work, so can't return a datarray in lon, lat. only a sparse matrix.
         maxbin = int(self.grid.bin_n.max().data)
         if len(self.cm_grid)-1 > maxbin:
             logger.warning('adding extra node to network')
@@ -1654,53 +1757,53 @@ class PMAR(object):
         else:
             _initial_condition_stack = initial_condition_stack
             print(_initial_condition_stack.shape)
-        
-        # ic_sparse = diags(_initial_condition_stack.data, shape=(CM.shape), format='coo')
-        # replaced by a sparse row vector: ic_sparse.dot(CM).sum(0) was only ever computing
-        # v @ CM for the vector v held on the diagonal, so building the full n x n diagonal
+
+        # ic_sparse = diags(_initial_condition_stack.data, shape=(cm.shape), format='coo')
+        # replaced by a sparse row vector: ic_sparse.dot(cm).sum(0) was only ever computing
+        # v @ cm for the vector v held on the diagonal, so building the full n x n diagonal
         # matrix was unnecessary.
         n_ic = len(_initial_condition_stack.data)
         ic_vec = coo_array(
             (_initial_condition_stack.data, (np.zeros(n_ic, dtype=int), np.arange(n_ic))),
-            shape=(1, CM.shape[0])
+            shape=(1, cm.shape[0])
         ).tocsr()
 
         if k is not None:
-            CM_csr = CM.tocsr()
+            cm_csr = cm.tocsr()
             if sum is True:
                 # like in Chamberlain et al. (2023), "the probability of a float sampling a given region within a range of time steps"
-                #CM = np.sum(matrix_power(CM, i) for i in range(1,k+1))
-                #CM = self.CM
-                # single_CM = CM
-                # new_CM = 0
+                #cm = np.sum(matrix_power(cm, i) for i in range(1,k+1))
+                #cm = self.cm
+                # single_cm = cm
+                # new_cm = 0
                 # for i in range(0,k+1): #k+1 otherwise range goes up to k-1
-                #     new_CM += matrix_power(single_CM,i) # this is wrong when there is a dummy node with high probability!!!
-                # CM = new_CM
-                # incremental vector propagation instead of recomputing matrix_power(CM, i)
+                #     new_cm += matrix_power(single_cm,i) # this is wrong when there is a dummy node with high probability!!!
+                # cm = new_cm
+                # incremental vector propagation instead of recomputing matrix_power(cm, i)
                 # from scratch for every i (same formula/result, O(k) instead of O(k log k)
-                # with progressive sparsity fill-in): total = sum_{i=0}^{k} v @ CM**i
+                # with progressive sparsity fill-in): total = sum_{i=0}^{k} v @ cm**i
                 current = ic_vec.copy()
-                total = ic_vec.copy()  # i=0 term: CM**0 = I, so v @ I = v
+                total = ic_vec.copy()  # i=0 term: cm**0 = I, so v @ I = v
                 for _ in range(1,k):
-                    current = current.dot(CM_csr)
+                    current = current.dot(cm_csr)
                     print('current sum =', current.sum(), 'current sum excluding leakage cell =', current[:,:-1].sum())
                     total = total + current
                     print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
                 cm_prediction_sparse = total
                 print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
             else:
-                # CM = matrix_power(CM, k)
-                # incremental vector propagation instead of forming CM**k as a full matrix
+                # cm = matrix_power(cm, k)
+                # incremental vector propagation instead of forming cm**k as a full matrix
                 # (avoids the fill-in that makes sparse matrix_power progressively slower for
-                # larger k): current = v @ CM**k
+                # larger k): current = v @ cm**k
                 current = ic_vec.copy()
                 for _ in range(k): # 1, k+1? otherwise range gets only up k-1?
-                    current = current.dot(CM_csr)
+                    current = current.dot(cm_csr)
                     #print('total sum =', current.sum(), 'sum excluding leakage cell =', current[:,:-1].sum())
                 cm_prediction_sparse = current
 
         else:
-            cm_prediction_sparse = ic_vec.dot(CM)
+            cm_prediction_sparse = ic_vec.dot(cm)
             
         # adding maxbin to exclude "dummy" node before reprojection
         cm_prediction = xr.DataArray(cm_prediction_sparse.toarray()[0][:maxbin+1],
@@ -1714,15 +1817,15 @@ class PMAR(object):
         return cm_prediction
 
     
-    def get_network(self, CM=None, node_names=None):
+    def get_network(self, cm=None, node_names=None):
         """
-        Build a directed networkx graph from the connectivity matrix CM.
+        Build a directed networkx graph from the connectivity matrix (cm).
 
         Parameters
         ----------
-        CM : scipy.sparse array, optional
+        cm : scipy.sparse array, optional
             Connectivity/transition matrix to use as the graph's adjacency matrix. Default
-            is None, i.e. self.CM.
+            is None, i.e. self.cm.
         node_names : dict, optional
             Mapping of node index to a name, attached to each node as 'node_name' (e.g. use
             cm_grid['layer'].to_dict()). Default is None.
@@ -1734,9 +1837,13 @@ class PMAR(object):
         """
         # use cm_grid['layer'].to_dict() for node_names
         self.node_names = node_names
-        if CM is None:
-            CM = self.CM
-        G = nx.from_scipy_sparse_array(CM, create_using=nx.DiGraph, edge_attribute='weight', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges
+        if cm is None:
+            cm = self.cm
+
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+            cm = self.cm.tocsr()[:-1,:-1]
+            
+        G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='weight', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges
         if node_names is not None:
             nx.set_node_attributes(G, values=node_names, name='node_name')
         self.network = G
@@ -1963,7 +2070,7 @@ class PMARmulti(PMAR):
     connectivity matrices across seedings.
 
     Developed at CNR ISMAR in Venice. Inherits PMAR's single-seeding machinery and overrides
-    get_trajectories, get_ppi, run, and get_Pij to loop over self.seedings repetitions
+    get_trajectories, get_ppi, run, and get_cm to loop over self.seedings repetitions
     (using a temporary single-seeding PMAR instance, `temp_self`, sharing this object's
     state, to compute per-seeding results before aggregating them). Adds sum_seedings() to
     sum per-seeding PPI rasters.
@@ -2223,14 +2330,14 @@ class PMARmulti(PMAR):
         pass
 
 
-    def get_Pij(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filenames=None):
+    def get_cm(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, buffer=None, filenames=None):
         '''
-        Compute the connectivity matrix CM averaged across all seedings in self.particle_list.
+        Compute the connectivity matrix (cm) averaged across all seedings in self.particle_list.
 
         For each seeding's particle file, builds a temporary single-seeding PMAR instance
         sharing this object's state, imports that seeding's trajectories (sliced to
         [t0, t1)), optionally applies weights (if self.use is set), computes that seeding's
-        transition matrix via PMAR.get_Pij(), and accumulates the mean across all seedings.
+        transition matrix via PMAR.get_cm(), and accumulates the mean across all seedings.
 
         Parameters
         ----------
@@ -2255,7 +2362,7 @@ class PMARmulti(PMAR):
         Returns
         -------
         scipy.sparse array
-            The averaged transition matrix (also stored on self.CM).
+            The averaged transition matrix (also stored on self.cm).
 
         Notes
         -----
@@ -2265,7 +2372,7 @@ class PMARmulti(PMAR):
         'seeding' dimension) before returning.
         '''
         for i, file in enumerate(self.particle_list):
-            logger.info(f'Calculating average CM out of {len(self.particle_list)} particle files.')
+            logger.info(f'Calculating average cm out of {len(self.particle_list)} particle files.')
             ds = xr.open_dataset(file).isel(time=slice(t0,t1))
             temp_self = PMAR(_internal=True)
             temp_self.__dict__ = self.__dict__
@@ -2281,13 +2388,13 @@ class PMARmulti(PMAR):
             else:
                 filename = None
                 
-            temp_self.get_Pij(cm_grid=cm_grid, res=res, study_area=study_area, t=-1, buffer=buffer, filename=filename, weighted=weighted)
+            temp_self.get_cm(cm_grid=cm_grid, res=res, study_area=study_area, t=-1, buffer=buffer, filename=filename, weighted=weighted)
             if i == 0:
-                Pij = temp_self.CM/len(self.particle_list)
+                cm = temp_self.cm/len(self.particle_list)
             else:
-                Pij = Pij + temp_self.CM/len(self.particle_list)
+                cm = cm + temp_self.cm/len(self.particle_list)
             del temp_self
-            logger.info(f'Done calculating CM for particle file {i}.')
+            logger.info(f'Done calculating cm for particle file {i}.')
         self.import_trajectories(self.particle_list) # restore self.ds to the full multi-seeding dataset, since temp_self shares self.__dict__ and overwrote it with each seeding's single-seeding ds above
-        self.CM = Pij
-        return Pij
+        self.cm = cm
+        return cm
