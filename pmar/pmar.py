@@ -30,7 +30,7 @@ from rasterio.enums import Resampling
 #from geocube.api.core import make_geocube
 import networkx as nx
 from pmar.cache import PMARCache
-from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus, select_spatial_domain
+from pmar.utils import traj_distinct, check_particle_file, get_marine_polygon, make_poly, harmonize_use, make_grid, make_vector_grid, get_copernicus, select_spatial_domain, get_emodnet_use
 #from cmap import Colormap
 from pmar.plotting import plot_map
 from scipy.sparse import coo_array, diags
@@ -896,9 +896,15 @@ class PMAR(object):
 
     def set_weights(self, res=None, study_area=None, weight=1, use=None, emission=None, decay_coef=0, normalize=False, assign=True):
         '''
-        Associate weights with each trajectory. 
+        Associate weights with each trajectory.
         ORDER OF OPERATIONS MATTERS.
-        Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).  
+        Weights depend on one or more of the following components: use value in each cell (use must be provided as quantity/day), emission (quantity/day), decay coefficient, number of trajectories starting in the same cell (normalize parameter).
+        use may also be given as a string, in which case it is treated as an EMODnet
+        Human Activities dataset identifier (as returned by pmar.utils.list_emodnet_uses())
+        and fetched via pmar.utils.get_emodnet_use(use, bbox=study_area) before being
+        passed on to harmonize_use(); this requires study_area (or self.study_area) to be
+        set, and raises ValueError if the identifier isn't recognised or returns no data
+        within study_area.
         '''
         
             
@@ -917,6 +923,15 @@ class PMAR(object):
             logger.warning(weight.shape)
 
         if use is not None:
+            if isinstance(use, str):
+                if study_area is None:
+                    raise ValueError(f"use='{use}' is an EMODnet dataset identifier, which requires study_area (or self.study_area) to be set, to know where to fetch it from.")
+                use_name = use
+                logger.info(f"use is a string; fetching '{use_name}' from EMODnet Human Activities within study_area {study_area}...")
+                use = get_emodnet_use(use_name, bbox=study_area)
+                use_empty = use.empty if hasattr(use, 'empty') else bool(np.isnan(use).all())
+                if use_empty:
+                    raise ValueError(f"EMODnet dataset '{use_name}' returned no data within study_area {study_area}.")
             use = harmonize_use(use, res, study_area=study_area, like=self.grid.Xc.rename({'x_c':'x', 'y_c':'y'}))#, tstep=self.ds.tstep) # renaming otherwise geocube does not recognise coords
             self.use = use
             use_value = self.use_by_traj(use=self.use, res=res, study_area=study_area).broadcast_like(self.ds.lon)
