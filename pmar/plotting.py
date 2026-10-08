@@ -16,6 +16,7 @@ tol_inc = Colormap('tol:incandescent').to_mpl()
 tol_muted = Colormap('tol:muted').to_mpl()
 rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
 tol_div = Colormap('tol:BuRd').to_mpl()
+rocket_r = sns.color_palette('rocket_r', as_cmap=True)
 
 def plot_map(subplot_rows=1, subplot_cols=1, sharex=False, sharey=False, proj=cartopy.crs.PlateCarree(), extent=None, coastres='10m', figsize=[8,6], title='', filename=None, top_labels=False, right_labels=False, left_labels=True, bottom_labels=True):
     """
@@ -126,7 +127,7 @@ def plot_matrix(array, tick_labels=None, figsize=[8,6], annot=False, linewidths=
     #return fig, ax 
 
 
-def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='tab:blue', edge_color='weight', width=2, rescale_edge=None, figsize=[7,7], extent=None, cmap=tol_inc, show_clusters=False, node_vmin=None, node_vmax=None, edge_vmin=None, edge_vmax=None):
+def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='tab:blue', edge_color='p', width=2, rescale_edge=None, figsize=[7,7], extent=None, cmap=tol_inc, show_clusters=False, node_vmin=None, node_vmax=None, edge_vmin=None, edge_vmax=None):
     """
     Draw a networkx graph (e.g. a PMAR connectivity network) on an optional basemap.
 
@@ -144,8 +145,8 @@ def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='
     node_color : str or array-like, optional
         Node color, or values to color nodes by. Default is 'tab:blue'.
     edge_color : str or array-like, optional
-        Edge color; if 'weight', edges are colored by their 'weight' attribute. Default is
-        'weight'.
+        Edge color; if 'p', edges are colored by their 'p' (transition probability)
+        attribute. Default is 'p'.
     width : float, optional
         Base edge width, overridden by `rescale_edge` if given. Default is 2.
     rescale_edge : float, optional
@@ -185,7 +186,7 @@ def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='
         labels = None
 
     if rescale_edge is not None:
-        width = np.array(list(nx.get_edge_attributes(G,'weight').values()))*50*rescale_edge
+        width = np.array(list(nx.get_edge_attributes(G,'p').values()))*50*rescale_edge
     else:
         width = width
 
@@ -200,8 +201,8 @@ def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='
         nx.set_node_attributes(G, cluster_id, name="cluster")
         node_color = nx.get_node_attributes(G,'cluster').values()
 
-    if edge_color == 'weight':
-        _edge_color = nx.get_edge_attributes(G, 'weight').values()
+    if edge_color == 'p':
+        _edge_color = nx.get_edge_attributes(G, 'p').values()
     else:
         _edge_color = edge_color
 
@@ -254,7 +255,7 @@ def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='
 
 
 
-    if edge_color == 'weight': 
+    if edge_color == 'p':
         from matplotlib.cm import ScalarMappable
         from matplotlib.colors import Normalize
         if edge_vmin is None:

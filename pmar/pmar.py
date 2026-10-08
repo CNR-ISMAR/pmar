@@ -1843,7 +1843,7 @@ class PMAR(object):
         if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
             cm = self.cm.tocsr()[:-1,:-1]
             
-        G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='weight', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges
+        G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges; 'p' for transition probability, matching connectivity_analysis()
         if node_names is not None:
             nx.set_node_attributes(G, values=node_names, name='node_name')
         self.network = G
@@ -1876,7 +1876,61 @@ class PMAR(object):
             node_shapes = self.cm_grid
             
         _plot_network(self.network, node_shapes=node_shapes, show_map=show_map, width=width, rescale_edge=rescale_edge, figsize=figsize, extent=extent, cmap=cmap)
-        
+
+    def export_network(self, out_path=None, node_shapes=None, weight_attr='p', curvature=0.1, self_loop_radius=None, n_points=30, include_nodes=True, style='both', width_range=(1, 8), p_range=(0, 1), cmap=None, draw_arrows=True, self_loop_arrow=True, arrow_length_range=None, arrow_width_range=None, target_gap=None, centrality_self_loops=True):
+        """
+        Export self.network (built by get_network) to a GeoJSON FeatureCollection of
+        curved, weighted, directed edges (+ node centrality attributes) via
+        pmar.utils.network_to_geojson, for rendering on an interactive web map.
+
+        Parameters
+        ----------
+        out_path : str, optional
+            If given, the GeoJSON is also written to this path. Default is None (only
+            returned).
+        node_shapes : geopandas.GeoDataFrame, optional
+            Polygon grid giving node positions. Default is None, i.e. self.cm_grid, or
+            self.cm_grid[:-1] if self.cm_grid has one more row than self.network has
+            nodes (the buffer cell added when get_cm/get_network were called with
+            buffer=...).
+        weight_attr, curvature, self_loop_radius, n_points, include_nodes, style,
+        width_range, p_range, cmap, draw_arrows, self_loop_arrow, arrow_length_range,
+        arrow_width_range, target_gap :
+            Passed through unchanged to pmar.utils.network_to_geojson(); see its
+            docstring (in particular, `style` controls whether 'stroke-width'/'stroke'
+            are baked into each edge feature, and `draw_arrows` whether a triangular
+            arrowhead feature is added at each edge's target end, so the map shows
+            correct thickness/color/direction with no app-side styling code beyond a
+            one-time property-to-style mapping).
+        centrality_self_loops : bool, optional
+            Whether self-loop edges (a cell's probability of transitioning to itself)
+            count toward the in_strength/out_strength/betweenness node attributes
+            computed below, passed to connectivity_analysis()'s self_loops= (default
+            True, matching the fact that self.network always includes self-loop edges).
+            Ignored if include_nodes is False.
+
+        Returns
+        -------
+        dict
+            GeoJSON FeatureCollection.
+        """
+        from pmar.utils import network_to_geojson
+
+        if node_shapes is None:
+            node_shapes = self.cm_grid
+            if len(node_shapes) == self.network.number_of_nodes() + 1:
+                node_shapes = node_shapes[:-1] # drop the buffer cell, absent from self.network
+
+        G = self.network
+        if include_nodes:
+            connectivity_df = self.connectivity_analysis(node_name='index', self_loops=centrality_self_loops, plot=False)
+            metrics = connectivity_df[['in_strength', 'out_strength', 'betweenness']].to_dict('index')
+            G = self.network.copy() # avoid mutating self.network with these attributes
+            for col in ('in_strength', 'out_strength', 'betweenness'):
+                nx.set_node_attributes(G, {n: m[col] for n, m in metrics.items()}, col)
+
+        return network_to_geojson(G, node_shapes, out_path=out_path, weight_attr=weight_attr, curvature=curvature, self_loop_radius=self_loop_radius, n_points=n_points, include_nodes=include_nodes, style=style, width_range=width_range, p_range=p_range, cmap=cmap, draw_arrows=draw_arrows, self_loop_arrow=self_loop_arrow, arrow_length_range=arrow_length_range, arrow_width_range=arrow_width_range, target_gap=target_gap)
+
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
     # note that this method fails if a trajectory goes back to same cell after a period of time. 
     def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
