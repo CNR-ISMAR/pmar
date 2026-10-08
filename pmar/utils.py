@@ -7,7 +7,9 @@ import cartopy.io.shapereader as shpreader
 import geopandas as gpd
 from rasterio.enums import Resampling
 import pandas as pd
-from shapely.geometry import Point, Polygon
+import networkx as nx
+import json
+from shapely.geometry import Point, Polygon, LineString
 from shapely import box
 from shapely.ops import unary_union
 from geocube.api.core import make_geocube
@@ -33,23 +35,24 @@ EMODNET_HITS_WORKERS = 20  # concurrency for list_emodnet_uses' per-layer featur
 
 
 SPATIAL_DOMAINS = {'global':
-                {'readers':
+                   {'extent': [-180, -80, 179.92, 90],
+                'label': 'CMEMS_Global_Renalysis',
+                                'readers':
                  {'physics': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
-                  #'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as physics
                   'waves': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
-              #    'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as physics
                  },
-                'extent': [-180, -80, 179.92, 90],
-                 'label': 'CMEMS_Global_Renalysis'
-                },
+},
 
                 'med':
                 {'readers':
                  {'physics': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
-                  'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
                   'waves': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
                  },
                  'extent': [-6, 30.19, 36.29, 45.98],
                 'label': 'CMEMS_Mediterranean_Renalysis'
@@ -59,8 +62,9 @@ SPATIAL_DOMAINS = {'global':
                 {'readers':
                  {'physics': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
-                  'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
                   'waves': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
+                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
                  },
                 'extent': [27.25, 40.5, 42, 47],
                 'label': 'CMEMS_Black_Sea_Renalysis'
@@ -70,8 +74,9 @@ SPATIAL_DOMAINS = {'global':
                 {'readers':
                  {'physics': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
-                  'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
                   'waves': 'cmems_mod_bal_wav_my_PT1H-i',
+                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
                  },
                  'extent': [9.04, 53.01, 30.21, 65.89],
                 'label': 'CMEMS_Baltic_Sea_Renalysis'
@@ -813,4 +818,256 @@ def traj_distinct(bin_n, weight):
         if bin_n[t] == bin_n[t-1]:
             w[t] = 0
     return w
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """JSON encoder that unwraps numpy scalars (e.g. np.float64, np.int64) to native types."""
+    def default(self, obj):
+        if isinstance(obj, np.generic):
+            return obj.item()
+        return super().default(obj)
+
+
+def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature=0.1, self_loop_radius=None, n_points=30, include_nodes=True, style='both', width_range=(1, 8), p_range=(0, 1), cmap=None, draw_arrows=True, self_loop_arrow=True, arrow_length_range=None, arrow_width_range=None, target_gap=None):
+    """
+    Export a directed, weighted PMAR connectivity network (as returned by
+    PMAR.get_network()) to a GeoJSON FeatureCollection of edges (+ optionally nodes), for
+    rendering on an interactive web map.
+
+    Each edge (i, j) is drawn as a quadratic Bezier curve between the centroids of
+    node_shapes.geometry[i] and node_shapes.geometry[j], bowed to one side using the same
+    convention as the 'arc3' connection style pmar.plotting._plot_network draws with
+    (connectionstyle='arc3, rad=0.1'), so that a reciprocal pair of edges (i->j and j->i)
+    curves away from each other instead of overlapping. A self-loop (i == i, the
+    probability a particle stays in the same cell) is instead drawn as a small closed
+    loop tangent to that node. If `draw_arrows` is set, each edge also gets a small
+    triangular arrowhead `Polygon` feature at its target end (tangent to the curve's own
+    end direction), so direction is visible directly in the geometry — there is no
+    simplestyle/Leaflet-default convention for line-end markers the way there is for
+    stroke width/color, so this *has* to be baked into the geometry itself rather than
+    left to app styling.
+
+    Every edge/arrowhead feature's properties carry 'source', 'target' (node indices) and
+    `weight_attr` (by default 'p', the transition probability from G's 'p' edge
+    attribute). GeoJSON itself has no notion of stroke thickness, so if `style` is set,
+    the edge's line width/color are *also* baked into the file as literal values, under
+    the de-facto "simplestyle-spec" property names ('stroke-width', 'stroke',
+    'stroke-opacity', and for arrowheads 'fill'/'fill-opacity') that GitHub, geojson.io
+    and similar viewers read automatically with no app code. Leaflet does not apply these
+    itself, but since they're already computed, wiring them up is a single reusable style
+    callback (not something you repeat per upload):
+
+        L.geoJSON(data, {
+            style: f => ({
+                color: f.properties.stroke,
+                weight: f.properties['stroke-width'],
+                opacity: f.properties['stroke-opacity'],
+                fillColor: f.properties.fill,
+                fillOpacity: f.properties['fill-opacity'],
+            }),
+        }).addTo(map);
+
+    Parameters
+    ----------
+    G : networkx.DiGraph
+        Directed, weighted graph as returned by PMAR.get_network() (edges must carry a
+        `weight_attr` attribute).
+    node_shapes : geopandas.GeoDataFrame
+        Polygon (or point) grid giving node positions, in the same row order as G's nodes
+        (e.g. the same node_shapes passed to PMAR.plot_network / pmar.plotting._plot_network,
+        such as p.cm_grid, or p.cm_grid[:-1] if a buffer cell was used).
+    out_path : str, optional
+        If given, the GeoJSON is also written to this path. Default is None (only
+        returned).
+    weight_attr : str, optional
+        Name of the edge attribute in G holding the transition weight/probability.
+        Default is 'p'.
+    curvature : float, optional
+        Bow of each curve, as a fraction of edge length, using the same convention as
+        matplotlib's 'arc3, rad=<curvature>' connection style. Default is 0.1.
+    self_loop_radius : float, optional
+        Radius of the small loop drawn for self-loop edges, in node_shapes' CRS units.
+        Default is None, i.e. a quarter of the median nearest-neighbour distance between
+        node centroids.
+    n_points : int, optional
+        Number of points used to discretize each curve/loop into a LineString. Default is
+        30.
+    include_nodes : bool, optional
+        If True, also include one Point feature per node (at its centroid), carrying its
+        id and any other node attributes set on G (e.g. 'node_name', or the centrality
+        metrics PMAR.export_network() attaches), in the same FeatureCollection. Default is
+        True; node_shapes' own geometries can still be dumped separately if preferred,
+        e.g. via node_shapes.to_file(..., driver='GeoJSON').
+    style : {'both', 'thickness', 'color', None, False}, optional
+        Which visual channel(s) to encode `weight_attr` into, as literal
+        'stroke-width'/'stroke' (+ 'stroke-opacity': 1) properties on each edge feature.
+        None/False disables this (only the raw `weight_attr` property is kept). Also
+        controls arrowhead 'fill' color (see `cmap`). Default is 'both'.
+    width_range : tuple of float, optional
+        (min, max) stroke width in pixels, linearly mapped across `p_range`. Default is
+        (1, 8). Ignored if `style` is 'color', None or False.
+    p_range : tuple of float, optional
+        (min, max) `weight_attr` value the width/color/arrow-size scales are stretched
+        across. Default is (0, 1) — `weight_attr` is a probability, so this keeps the
+        same edge always looking the same across different exported networks; pass e.g.
+        (min(p_values), max(p_values)) instead to stretch to this network's own range for
+        more within-map contrast. Values outside the range are clipped.
+    cmap : str or matplotlib colormap, optional
+        Colormap sampled for 'stroke' (and arrowhead 'fill', when `style` includes
+        color), as a matplotlib colormap name or object. Default is None, i.e.
+        matplotlib's 'Reds' (sequential, low-to-high contrast). Ignored if `style` is
+        'thickness', None or False.
+    draw_arrows : bool, optional
+        If True, add a triangular arrowhead Polygon feature at the target end of each
+        edge (see `self_loop_arrow` for self-loops), sized by `arrow_length_range`/
+        `arrow_width_range`. Default is True.
+    self_loop_arrow : bool, optional
+        If True (and `draw_arrows` is True), self-loops get an arrowhead too, where the
+        loop closes back onto the node. Default is True.
+    arrow_length_range, arrow_width_range : tuple of float, optional
+        (min, max) arrowhead length/width, in node_shapes' CRS units, linearly mapped
+        across `p_range` the same way `width_range` maps to stroke-width — i.e. stronger
+        edges get bigger arrowheads. Default is None for both, i.e. (0.03, 0.09) and
+        (0.02, 0.05) times the median nearest-neighbour distance between node centroids
+        (the same length scale `self_loop_radius` auto-derives from). Ignored if
+        `draw_arrows` is False.
+    target_gap : float, optional
+        Distance, in node_shapes' CRS units, by which every edge (line + arrowhead, if
+        any) is pulled back from its target node, instead of touching/overlapping it
+        exactly. Edges are trimmed at their target end only (not at the source), so
+        multiple edges converging on a popular node end at that offset instead of
+        stacking on top of each other and the node marker. Default is None, i.e. 0.1
+        times the median nearest-neighbour distance between node centroids.
+
+    Returns
+    -------
+    dict
+        GeoJSON FeatureCollection.
+    """
+    coords = np.column_stack((node_shapes.geometry.centroid.x, node_shapes.geometry.centroid.y))
+    positions = dict(zip(G.nodes, coords))
+
+    from scipy.spatial import cKDTree
+    tree = cKDTree(coords)
+    nearest_dist, _ = tree.query(coords, k=2) # k=1 is each point itself, at distance 0
+    median_nn_dist = np.median(nearest_dist[:, 1])
+
+    if self_loop_radius is None:
+        self_loop_radius = median_nn_dist * 0.25
+    if arrow_length_range is None:
+        arrow_length_range = (median_nn_dist * 0.03, median_nn_dist * 0.09)
+    if arrow_width_range is None:
+        arrow_width_range = (median_nn_dist * 0.02, median_nn_dist * 0.05)
+    if target_gap is None:
+        target_gap = median_nn_dist * 0.1
+
+    p_min, p_max = p_range
+
+    def _normalize(value):
+        t = 0.0 if p_max == p_min else (value - p_min) / (p_max - p_min)
+        return min(max(t, 0.0), 1.0)
+
+    if style:
+        from matplotlib.colors import to_hex
+        if cmap is None:
+            cmap = plt.get_cmap('Reds')
+        elif isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+        w_min, w_max = width_range
+
+        def _edge_style_props(t):
+            props = {}
+            if style in ('both', 'thickness'):
+                props['stroke-width'] = float(w_min + t * (w_max - w_min))
+            if style in ('both', 'color'):
+                props['stroke'] = to_hex(cmap(t))
+            if props:
+                props['stroke-opacity'] = 1.0
+            return props
+
+    al_min, al_max = arrow_length_range
+    aw_min, aw_max = arrow_width_range
+
+    def _arrowhead(line_coords, t, fill_color):
+        p_end, p_prev = np.array(line_coords[-1]), np.array(line_coords[-2])
+        d = p_end - p_prev
+        norm = np.linalg.norm(d)
+        d = d / norm if norm > 0 else np.array([1.0, 0.0])
+        perp = np.array([-d[1], d[0]])
+        arrow_length = al_min + t * (al_max - al_min)
+        arrow_width = aw_min + t * (aw_max - aw_min)
+        base_center = p_end - d * arrow_length
+        base_left = base_center + perp * (arrow_width / 2)
+        base_right = base_center - perp * (arrow_width / 2)
+        ring = [p_end, base_left, base_right, p_end]
+        return {
+            'type': 'Feature',
+            'geometry': {'type': 'Polygon', 'coordinates': [[[float(x), float(y)] for x, y in ring]]},
+            'properties': {'fill': fill_color, 'fill-opacity': 1.0},
+        }
+
+    features = []
+    for u, v, data in G.edges(data=True):
+        x1, y1 = positions[u]
+        is_self_loop = (u == v)
+
+        if is_self_loop:
+            # small loop tangent to the node, starting exactly at (x1, y1) and ending
+            # target_gap short of it (along the circle) so the arrowhead doesn't sit
+            # exactly on top of the node marker
+            shrink_angle = min(2 * np.pi, target_gap / self_loop_radius) if self_loop_radius > 0 else 0.0
+            theta = np.pi + np.linspace(0, 2 * np.pi - shrink_angle, n_points)
+            cx, cy = x1 + self_loop_radius, y1
+            line_coords = list(zip(cx + self_loop_radius * np.cos(theta), cy + self_loop_radius * np.sin(theta)))
+        else:
+            # quadratic Bezier curve, bowed perpendicular to the i->j segment (same
+            # geometry as matplotlib's connectionstyle='arc3, rad=<curvature>'), trimmed
+            # target_gap short of the target node (linear approximation around the
+            # curve's own end tangent, 2*(P1-C))
+            x2, y2 = positions[v]
+            xm, ym = (x1 + x2) / 2, (y1 + y2) / 2
+            dx, dy = x2 - x1, y2 - y1
+            cx, cy = xm + curvature * dy, ym - curvature * dx
+            tangent_norm = 2 * np.hypot(x2 - cx, y2 - cy)
+            s_shrink = min(1.0, target_gap / tangent_norm) if tangent_norm > 0 else 0.0
+            s_max = max(0.0, 1.0 - s_shrink)
+            s = np.linspace(0, s_max, n_points)
+            bx = (1 - s) ** 2 * x1 + 2 * (1 - s) * s * cx + s ** 2 * x2
+            by = (1 - s) ** 2 * y1 + 2 * (1 - s) * s * cy + s ** 2 * y2
+            line_coords = list(zip(bx, by))
+
+        value = data[weight_attr]
+        t = _normalize(value)
+        props = {'source': int(u), 'target': int(v), weight_attr: float(value)}
+        if style:
+            props.update(_edge_style_props(t))
+
+        features.append({
+            'type': 'Feature',
+            'geometry': {'type': 'LineString', 'coordinates': [[float(x), float(y)] for x, y in line_coords]},
+            'properties': props,
+        })
+
+        if draw_arrows and (not is_self_loop or self_loop_arrow):
+            fill_color = props.get('stroke', '#333333')
+            arrow_feature = _arrowhead(line_coords, t, fill_color)
+            arrow_feature['properties'].update({'source': int(u), 'target': int(v), weight_attr: float(value)})
+            features.append(arrow_feature)
+
+    if include_nodes:
+        for n, d in G.nodes(data=True):
+            x, y = positions[n]
+            features.append({
+                'type': 'Feature',
+                'geometry': {'type': 'Point', 'coordinates': [float(x), float(y)]},
+                'properties': {'id': int(n), **d},
+            })
+
+    geojson = {'type': 'FeatureCollection', 'features': features}
+
+    if out_path is not None:
+        with open(out_path, 'w') as f:
+            json.dump(geojson, f, cls=_NumpyEncoder)
+
+    return geojson
     
