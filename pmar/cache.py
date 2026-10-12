@@ -17,7 +17,7 @@ class PMARCache(object):
     deliberate edit to the field set itself (paired with bumping `version`) should do that.
     """
 
-    def __init__(self, cachedir): # cachedir è una sottodirectory di basedir
+    def __init__(self, cachedir):
         """
         Parameters
         ----------
