@@ -234,7 +234,6 @@ def make_poly(bounds, crs='4326', save_to=None):
     
     if save_to is not None:
         poly.to_file(save_to, driver='ESRI Shapefile')
-        #self.poly_path = str(q)
     return poly
 
 
@@ -264,9 +263,6 @@ def make_grid(res, study_area, crs='epsg:4326'):
         - bin_n : unique sequential integer id (0-based) for each ocean grid cell, NaN over
           land; used to bin/group trajectories spatially (see get_bin_n).
     """
-    #if study_area is None:
-      #  study_area = self.study_area
-
     shpfilename = shpreader.natural_earth(resolution='10m',
             category='physical',
             name='ocean')
@@ -296,18 +292,6 @@ def make_grid(res, study_area, crs='epsg:4326'):
     
     grid['mask'] = mask
     grid['bin_n'] = bin_n#.astype(int)
-    
-    #grid = grid.assign({'bin_n': (('y_c','x_c'), bin_n.where(bin_n>0)),
-     #                  'mask': (('y_c','x_c'), mask)})
-    
-    
-    # grid = Grid(grid, 
-    #             coords={"X": {"center": "x_c", "outer": "x_e"}, 
-    #                    'Y': {"center": "y_c", "outer": "y_e"}}, 
-    #             metrics = {
-    #     ('X',): ['dx'], # X distances
-    #     ('Y',): ['dy']},
-    #            periodic=False)
 
     return grid
 
@@ -396,35 +380,6 @@ def rasterhd2raster(raster_hd, grid):
              )                                                                                                                                                                          
     return raster 
     
-def _rasterize_points_add(point_data, like, measurements=None):
-    '''
-    Rasterize point data onto the grid of like by summing measurements within each cell.
-
-    Parameters
-    ----------
-    point_data : geopandas.GeoDataFrame
-        Point geometries with a column, given by measurements, to burn into the raster.
-    like : xarray.DataArray
-        Raster grid whose shape/resolution/crs the output is rasterized to match.
-    measurements : str or list of str, optional
-        Name(s) of the column(s) in point_data to sum into each raster cell. Default is
-        None, which logs a warning since no value is specified to sum with MergeAlg.add.
-
-    Returns
-    -------
-    xarray.Dataset
-        Rasterized data on like's grid, with values in each cell equal to the sum of
-        measurements from all points falling in (or touching, all_touched=True) that cell.
-    '''
-    raster_data = make_geocube(vector_data=point_data, measurements=measurements, 
-                    like=like,
-                    #resolution=(-res, res), 
-                    fill=0,
-                    rasterize_function=partial(rasterize_image, merge_alg=MergeAlg.add, fill=0, all_touched=True, filter_nan=True))
-    if measurements is None:
-        logger.warning('no "measurement" given in make_geocube, i.e. value to sum with mergealg.')
-    return raster_data
-
 def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
     '''
     Rasterize vector_data onto the grid of like, burning column_to_burn while conserving its
@@ -473,9 +428,8 @@ def rasterize_conserve(vector_data, like, column_to_burn, all_touched=False):
         measurements=[f'rescaled_{column_to_burn}']
         _like = like.rio.reproject(dst_crs=like.rio.crs, resolution=[like.rio.resolution()[0]/3,like.rio.resolution()[1]/3 ], resampling=Resampling.average) # this gives a ~10% error on polygon edges
 
-    raster_data = make_geocube(vector_data=vector_data, measurements=measurements, 
+    raster_data = make_geocube(vector_data=vector_data, measurements=measurements,
                     like=_like,
-                    #resolution=(-res, res), 
                     fill=0,
                     rasterize_function=partial(rasterize_image, fill=0, merge_alg=merge_alg, all_touched=all_touched, filter_nan=True)).to_array().squeeze()
 
@@ -495,9 +449,8 @@ def _wfs_has_features(name, bbox, wfs_url):
             'TYPENAMES': name, 'BBOX': bbox_str, 'RESULTTYPE': 'hits',
         }, timeout=30)
         resp.raise_for_status()
-        # AUDIT.md fragile spot: parse with ElementTree (consistent with the rest of this
-        # file) instead of a regex over the raw XML text, which breaks if the attribute's
-        # formatting/whitespace ever differs
+        # parse with ElementTree (consistent with the rest of this file) instead of a
+        # regex over the raw XML text, which breaks if the attribute's formatting/whitespace differs
         try:
             number_matched = ET.fromstring(resp.text).attrib.get('numberMatched')
         except ET.ParseError:  # malformed/unexpected XML body -- same fallback as a missing attribute below
@@ -550,7 +503,7 @@ def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_U
     bbox_poly = box(*bbox)
     rows = []
 
-    wfs = WebFeatureService(wfs_url, version='2.0.0', timeout=30)  # explicit timeout (AUDIT.md fragile spot), matching the requests.get calls elsewhere in this file
+    wfs = WebFeatureService(wfs_url, version='2.0.0', timeout=30)  # explicit timeout, matching the requests.get calls elsewhere in this file
     wfs_candidates = []
     for name, layer in wfs.contents.items():
         if layer.boundingBoxWGS84 is None:
@@ -741,10 +694,10 @@ def harmonize_use(use, res, study_area, like, tstep=None):
         If use is a GeoDataFrame with more than one non-geometry column (ambiguous which
         column to burn), or with no non-geometry column at all.
     '''
-    # AUDIT.md fragile spot: dispatch on the actual type of `use` explicitly instead of
-    # using a bare `except:` as control flow -- that previously masked real errors and,
-    # when `use` matched none of the expected cases, left `raster_use` unbound (raising a
-    # confusing UnboundLocalError below instead of a clear message about what went wrong).
+    # Dispatch on the actual type of `use` explicitly instead of using a bare `except:` as
+    # control flow -- that previously masked real errors and, when `use` matched none of
+    # the expected cases, left `raster_use` unbound (raising a confusing UnboundLocalError
+    # below instead of a clear message about what went wrong).
     if isinstance(use, str):  # use is a path: dispatch on its file extension
         suffix = Path(use).suffix
         if suffix == '.shp':

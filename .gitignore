@@ -2,6 +2,11 @@
 pmar_output/
 pmar_demo_output/
 
+# Local-only session files
+AUDIT.md
+scripts/migrate_cache_v1.py
+scripts/migrate_cache_v2.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
