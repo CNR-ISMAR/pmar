@@ -1,5 +1,5 @@
 import os
-from distutils.core import setup
+from setuptools import setup
 
 
 def read(*rnames):
@@ -24,5 +24,11 @@ setup(
     packages=['pmar',],
     include_package_data=True,
     zip_safe=False,
-    install_requires=['rioxarray', 'geopandas', 'seaborn', 'pydap', 'owslib', 'requests']
+    python_requires='>=3.11',  # the real floor across this dependency set is networkx's >=3.11
+    install_requires=[
+        'cartopy', 'cmap', 'geocube', 'geopandas', 'matplotlib', 'networkx',
+        'numpy', 'opendrift', 'owslib', 'pandas', 'pydap', 'rasterio',
+        'requests', 'rioxarray', 'scipy', 'seaborn', 'shapely', 'xarray',
+        'xhistogram',
+    ],
 )
