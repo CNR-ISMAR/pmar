@@ -23,7 +23,10 @@ from opendrift.readers import reader_shape
 import cartopy.io.shapereader as shpreader
 from pathlib import Path
 #from flox.xarray import xarray_reduce # for xarray grouping over multiple variables
-os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
+# Removed (AUDIT.md fragile spot): hardcoded to one specific conda env path, breaking
+# import for anyone else. Verified unnecessary on current pyproj (>=3), which already
+# auto-detects its own data dir correctly without PROJ_LIB being set at all.
+# os.environ['PROJ_LIB'] = '/var/miniconda3/envs/opendrift/share/proj/'
 from functools import partial
 from rasterio.enums import Resampling
 #import glob
@@ -41,8 +44,20 @@ logger = logging.getLogger('pmar')
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
-        
-        
+
+# Sentinel value marking the "outside the tracked domain" buffer cell appended to
+# cm_grid/cm by get_particles_by_cell() when buffer= is used. Named here (AUDIT.md
+# fragile spot) so every check against it is guaranteed consistent, rather than
+# re-typing the -1234/-1234.0 literal (previously inconsistent between int and float).
+BUFFER_CELL_SENTINEL = -1234.0
+
+# Buffer (metres) added around a Point/MultiPoint seeding_shapefile geometry before
+# seeding, so seed_from_shapefile has a small area (not a single coordinate) to seed
+# particles within. Named here (AUDIT.md fragile spot) rather than left as an unexplained
+# inline literal.
+POINT_SEEDING_BUFFER_M = 2000
+
+
 class PMAR(object):
     """
     Particle-based Modelling and Analysis for MARine Decision Support.
@@ -199,7 +214,8 @@ class PMAR(object):
                 self.spatial_domain = get_copernicus(str(spatial_domain))
                 self.extent = self.spatial_domain['extent']
 
-            except:
+            except ValueError:
+                # get_copernicus raises ValueError for a name not in SPATIAL_DOMAINS --
                 # alternatively, provide paths to readers manually
                 self.spatial_domain = {'readers': dict(zip(range(0,len(spatial_domain)),spatial_domain))}
         
@@ -313,18 +329,18 @@ class PMAR(object):
         if type(files_to_import) is str:
             self.particle_path = files_to_import
             ds = xr.open_dataset(self.particle_path)
-            print('string')
-            
+            logger.debug('importing a single trajectory file (string path)')
+
         elif type(files_to_import) is list:
             self.particle_list = files_to_import
             self.seedings = len(self.particle_list)
-            
+
             ds = xr.open_mfdataset(self.particle_list, parallel=True, combine='nested', join='outer', concat_dim='seeding') # this will give all seedings the same dimensions and pad them with nans
-            print('list')
-            
+            logger.debug('importing multiple trajectory files (list of paths)')
+
         elif type(files_to_import) is xr.core.dataset.Dataset:
-            ds = files_to_import 
-            print('ds')
+            ds = files_to_import
+            logger.debug('importing an already-open xr.Dataset')
         
         elif type(files_to_import) is list:
             raise ValueError('Please use PMARmulti class to import multiple trajectory files.')
@@ -519,7 +535,9 @@ class PMAR(object):
         self._resolve_spatial_domain(seeding_shapefile, seed_within_bounds)
 
         if seed_within_bounds is not None:
-            poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
+            # AUDIT.md fragile spot: previously contained a literal ':' (invalid in filenames
+            # on some filesystems/Windows) and a stray Unicode em-dash instead of '_'.
+            poly_path = f'polygon-crs_epsg{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat_{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
             q = self.basedir / 'polygons' / poly_path
             make_poly(seed_within_bounds, crs=crs, save_to=str(q))
             # COULD REPLACE THIS WITH VECTOR GRID
@@ -563,7 +581,7 @@ class PMAR(object):
             
             if 'Point' in list(gpd.read_file(self.seeding_shapefile).geometry.type):
                 seeding_poly = gpd.read_file(self.seeding_shapefile)
-                seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(2000).to_crs(4326)
+                seeding_poly['geometry'] = seeding_poly.geometry.to_crs('3857').geometry.buffer(POINT_SEEDING_BUFFER_M).to_crs(4326)
                 new_seeding_shapefile = Path(self.basedir / 'polygons' / ('buffered_'+self.seeding_shapefile.split('/')[-1]))
                 seeding_poly.to_file(new_seeding_shapefile)
                 self.seeding_shapefile = str(new_seeding_shapefile)
@@ -822,17 +840,12 @@ class PMAR(object):
         Filtering trajectories by status (active, stranded or seafloor).
         """
         available_status = {'active': 0, 'stranded': 1, 'seafloor': 2}
+        if status not in available_status:
+            raise ValueError(f"Unrecognised status {status!r}. Status must be one of {list(available_status)}.")
 
-#        try:
         ds = self.ds
-#        except:
-#            ds = self.get_ds
-
-        try:
-            traj = ds.trajectory.where(ds.isel(time=-1).status==available_status[status]).dropna('trajectory').data
-            filtered_ds = ds.sel(trajectory=traj)
-        except:
-            logger.warning("Unrecognised status. Status must be one of 'active', 'stranded', 'seafloor'. No filtering by status was carried out.")    
+        traj = ds.trajectory.where(ds.isel(time=-1).status==available_status[status]).dropna('trajectory').data
+        filtered_ds = ds.sel(trajectory=traj)
         logger.info(f'Rasterizing only {status} particles.')
         return filtered_ds
 
@@ -991,6 +1004,7 @@ class PMAR(object):
 
         if decay_coef != 0:
         # decay rate. default is no decay, but this is still useful to give weight the correct shape
+            self.decay_coef = decay_coef
             logger.info(f'computing decay rate function with decay coefficient k = {self.decay_coef}...')
             y = self.decay_rate(k=decay_coef) # default value = 0 means there is no decay
             weight = weight*y
@@ -1104,7 +1118,7 @@ class PMAR(object):
         if t is not None:
             ds = self.ds.isel(time=t)
             dim = None #['trajectory','time']
-            print(f'calculating histogram at time {t}')
+            logger.debug(f'calculating histogram at time {t}')
         else:
             ds = self.ds 
         
@@ -1261,7 +1275,7 @@ class PMAR(object):
         # add buffer 
         if buffer is not None:
             buff = cm_grid.dissolve().buffer(buffer)
-            diff = gpd.GeoDataFrame({cm_grid.columns.drop('geometry')[0]: -1234, 'geometry': buff.difference(cm_grid.dissolve())}, crs=cm_grid.crs)
+            diff = gpd.GeoDataFrame({cm_grid.columns.drop('geometry')[0]: BUFFER_CELL_SENTINEL, 'geometry': buff.difference(cm_grid.dissolve())}, crs=cm_grid.crs)
             cm_grid = pd.concat([cm_grid, diff]).reset_index(drop=True)
         
         self.cm_grid = cm_grid
@@ -1498,61 +1512,65 @@ class PMAR(object):
         return Pij_sparse
 
     # to update
-    def get_Pji(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=True):
-        """
-        Calculate reverse transition probabilities Pji: the probability that a particle
-        found in cell j at t1 originated from cell i at t0, for each pair of cells.
+    # Quarantined (AUDIT.md P0): confirmed broken -- calls self._get_Nij, which doesn't
+    # exist (only get_Nij does), so this raises AttributeError on any call. Its logic was
+    # never verified correct either way; deferred to a dedicated fix/redesign pass rather
+    # than guessing at a repair here.
+    # def get_Pji(self, cm_grid=None, res=None, study_area=None, t0=0, t1=-1, filename=True):
+    #     """
+    #     Calculate reverse transition probabilities Pji: the probability that a particle
+    #     found in cell j at t1 originated from cell i at t0, for each pair of cells.
+    #
+    #     Parameters
+    #     ----------
+    #     cm_grid : geopandas.GeoDataFrame, optional
+    #         Polygon grid to use. Default is None.
+    #     res : float, optional
+    #         Resolution for building a new grid, if cm_grid is None. Default is None.
+    #     study_area : list, optional
+    #         Spatial bounds for the grid. Default is None, i.e. self.study_area.
+    #     t0 : int, optional
+    #         Origin timestep index. Default is 0.
+    #     t1 : int, optional
+    #         Destination timestep index. Default is -1.
+    #     filename : str or bool, optional
+    #         If given (and not None), path to write the resulting sparse matrix to (Matrix
+    #         Market format). Default is True.
+    #
+    #     Returns
+    #     -------
+    #     scipy.sparse array
+    #         The reverse transition matrix Pji_sparse.
+    #     """
+    #     ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1)
+    #     # _Nij_sparse = []
+    #     # _Pij_sparse = []
+    #     _Pji_sparse = []
+    #     row = []
+    #     col = []
+    #
+    #     for i in range(len(self.cm_grid)):
+    #         for j in range(len(self.cm_grid)):
+    #             N = len(set(ll[0][i]).intersection(ll[1][j]))
+    #             if N > 0:
+    #                 # _Nij_sparse.append(N)
+    #                 # _Pij_sparse.append(N / len(ll[0][i]))
+    #                 _Pji_sparse.append(N / len(ll[1][j]))
+    #                 row.append(i)
+    #                 col.append(j)
+    #
+    #     # Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+    #     # Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
+    #     Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(self.cm_grid), len(self.cm_grid)))).T
+    #
+    #     #self.cm_grid = cm_grid
+    #     #self.CM = Pij_sparse
+    #
+    #     if filename is not None:
+    #         mmwrite(filename, Pji_sparse)
+    #
+    #     return Pji_sparse
 
-        Parameters
-        ----------
-        cm_grid : geopandas.GeoDataFrame, optional
-            Polygon grid to use. Default is None.
-        res : float, optional
-            Resolution for building a new grid, if cm_grid is None. Default is None.
-        study_area : list, optional
-            Spatial bounds for the grid. Default is None, i.e. self.study_area.
-        t0 : int, optional
-            Origin timestep index. Default is 0.
-        t1 : int, optional
-            Destination timestep index. Default is -1.
-        filename : str or bool, optional
-            If given (and not None), path to write the resulting sparse matrix to (Matrix
-            Market format). Default is True.
-
-        Returns
-        -------
-        scipy.sparse array
-            The reverse transition matrix Pji_sparse.
-        """
-        ll = self._get_Nij(cm_grid=cm_grid, res=res, study_area=study_area, t0=t0, t1=t1)
-        # _Nij_sparse = []
-        # _Pij_sparse = []
-        _Pji_sparse = []
-        row = []
-        col = []
-        
-        for i in range(len(self.cm_grid)):
-            for j in range(len(self.cm_grid)):
-                N = len(set(ll[0][i]).intersection(ll[1][j]))
-                if N > 0:
-                    # _Nij_sparse.append(N)
-                    # _Pij_sparse.append(N / len(ll[0][i]))
-                    _Pji_sparse.append(N / len(ll[1][j]))
-                    row.append(i)
-                    col.append(j)
-        
-        # Nij_sparse = coo_array((_Nij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
-        # Pij_sparse = coo_array((_Pij_sparse, (row, col)), shape=((len(cm_grid), len(cm_grid))))
-        Pji_sparse = coo_array((_Pji_sparse, (row, col)), shape=((len(self.cm_grid), len(self.cm_grid)))).T
-        
-        #self.cm_grid = cm_grid 
-        #self.CM = Pij_sparse
-
-        if filename is not None:
-            mmwrite(filename, Pji_sparse)
-        
-        return Pji_sparse
-    
 
     def plot_cm(self, tick_labels=None, figsize=[8,6], annot=False, linewidths=0, vmin=0, vmax=None, norm=None, cmap='Greys', mask=None):
         """
@@ -1601,7 +1619,10 @@ class PMAR(object):
         if cm is None:
             cm = self.cm
 
-        cm_grid = cm_grid.to_crs(32601)
+        # project to a locally-appropriate UTM zone for metric distances, instead of a
+        # single hardcoded zone (AUDIT.md: zone 32601, near the international date line,
+        # was wrong for every basin except coincidentally near it)
+        cm_grid = cm_grid.to_crs(cm_grid.estimate_utm_crs())
 
         disp_dist = np.zeros(len(cm_grid))
         for i in range(len(cm_grid)):
@@ -1650,7 +1671,7 @@ class PMAR(object):
             self.cm_grid's node_name and geometry columns, plus 'in_strength',
             'out_strength' and 'betweenness' for each cell.
         '''
-        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
             cm = self.cm.tocsr()[:-1,:-1] # exclude buffer 
             cm_grid = self.cm_grid[:-1]
         else:
@@ -1687,50 +1708,55 @@ class PMAR(object):
             
         return connectivity_df
 
-    def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
-        '''
-        Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle found in cell {destination_idx} originated from the other cells?
-        '''
-        cm_grid = self.cm_grid
-        cm_grid[f'origin_of_{destination_idx}'] = Pji_sparse.toarray()[destination_idx]*100 
-        # check sum of probabilities is 100
-        print(cm_grid[f'origin_of_{destination_idx}'].sum(), '%')
+    # Quarantined (AUDIT.md P0): confirmed broken -- references bare names `plt` and
+    # `tol_inc`, neither imported/defined in this file, so this raises NameError on any
+    # call. Deferred to a dedicated fix pass rather than guessing at a repair here.
+    # def plot_origin(self, Pji_sparse, destination_idx, annotate=False):
+    #     '''
+    #     Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle found in cell {destination_idx} originated from the other cells?
+    #     '''
+    #     cm_grid = self.cm_grid
+    #     cm_grid[f'origin_of_{destination_idx}'] = Pji_sparse.toarray()[destination_idx]*100
+    #     # check sum of probabilities is 100
+    #     print(cm_grid[f'origin_of_{destination_idx}'].sum(), '%')
+    #
+    #     fig, ax = plot_map()
+    #     im=cm_grid.plot(column=f'origin_of_{destination_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
+    #     ax.set_title('probability of each cell being the origin, \ngiven initial condition')
+    #     cm_grid.iloc[[destination_idx]].boundary.plot(color='k', linewidth=1, label='destination cell', ax=ax, linestyle='--')
+    #     plt.legend()
+    #     if annotate is True:
+    #         if len(cm_grid) < 400: # arbitrary
+    #             cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
+    #             for i in range(len(cm_grid)):
+    #                 ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
+    #
+    #     return cm_grid[f'origin_of_{destination_idx}']
 
-        fig, ax = plot_map()
-        im=cm_grid.plot(column=f'origin_of_{destination_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
-        ax.set_title('probability of each cell being the origin, \ngiven initial condition')
-        cm_grid.iloc[[destination_idx]].boundary.plot(color='k', linewidth=1, label='destination cell', ax=ax, linestyle='--')
-        plt.legend()
-        if annotate is True:
-            if len(cm_grid) < 400: # arbitrary
-                cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
-                for i in range(len(cm_grid)):
-                    ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
 
-        return cm_grid[f'origin_of_{destination_idx}']
-            
-
-    def plot_destination(self, Pij_sparse, origin_idx, annotate=False):
-        '''
-        Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle seeded in cell {origin_idx} will end up in the other cells?
-        '''
-        cm_grid = self.cm_grid
-        cm_grid[f'destination_of_{origin_idx}'] = Pij_sparse.toarray()[origin_idx]*100 
-        # check sum of probabilities is 100
-        print(cm_grid[f'destination_of_{origin_idx}'].sum(), '%')
-
-        fig, ax = plot_map()
-        im=cm_grid.plot(column=f'destination_of_{origin_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
-        ax.set_title('probability of each cell being the destination, \ngiven initial condition')
-        cm_grid.iloc[[origin_idx]].boundary.plot(color='k', linewidth=1, label='origin cell', ax=ax, linestyle='--')
-        plt.legend()
-        if annotate is True:
-            if len(cm_grid) < 400: # arbitrary
-                cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
-                for i in range(len(cm_grid)):
-                    ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
-
-        return cm_grid[f'destination_of_{origin_idx}']
+    # Quarantined (AUDIT.md P0): confirmed broken -- same undefined `plt`/`tol_inc`
+    # issue as plot_origin above. Deferred to the same future fix pass.
+    # def plot_destination(self, Pij_sparse, origin_idx, annotate=False):
+    #     '''
+    #     Given my initial condition (i.e. particle distribution at start time), what is the probability that a particle seeded in cell {origin_idx} will end up in the other cells?
+    #     '''
+    #     cm_grid = self.cm_grid
+    #     cm_grid[f'destination_of_{origin_idx}'] = Pij_sparse.toarray()[origin_idx]*100
+    #     # check sum of probabilities is 100
+    #     print(cm_grid[f'destination_of_{origin_idx}'].sum(), '%')
+    #
+    #     fig, ax = plot_map()
+    #     im=cm_grid.plot(column=f'destination_of_{origin_idx}', ax=ax, legend=True, cmap=tol_inc, legend_kwds={'format':'%.0f%%'})
+    #     ax.set_title('probability of each cell being the destination, \ngiven initial condition')
+    #     cm_grid.iloc[[origin_idx]].boundary.plot(color='k', linewidth=1, label='origin cell', ax=ax, linestyle='--')
+    #     plt.legend()
+    #     if annotate is True:
+    #         if len(cm_grid) < 400: # arbitrary
+    #             cm_grid.boundary.plot(ax=ax, linewidth=0.5, color='grey')
+    #             for i in range(len(cm_grid)):
+    #                 ax.annotate(i, xy=[cm_grid.iloc[[i]].geometry.centroid.x, cm_grid.iloc[[i]].geometry.centroid.y], fontsize=8)
+    #
+    #     return cm_grid[f'destination_of_{origin_idx}']
 
 
     def predict_with_cm(self, initial_condition, initial_condition_crs='epsg:4326', cm=None, k=None, sum=False):
@@ -1783,7 +1809,7 @@ class PMAR(object):
             logger.info('initial_condition and cm dimensions match.')
 
         initial_condition_stack = initial_condition.stack(origin=('y_c','x_c')).dropna('origin')
-        print(initial_condition_stack.shape)
+        logger.debug(initial_condition_stack.shape)
 
         ## this would be for the case where an extra node was added to denote "everywhere else" outside of cm_grid.
         ## but unstack obviously does not work, so can't return a datarray in lon, lat. only a sparse matrix.
@@ -1791,10 +1817,10 @@ class PMAR(object):
         if len(self.cm_grid)-1 > maxbin:
             logger.warning('adding extra node to network')
             _initial_condition_stack = xr.concat([initial_condition_stack, xr.DataArray(data=[[0]], dims={'x_c':0, 'y_c':0}).stack(origin=('y_c','x_c'))], dim='origin')
-            print(_initial_condition_stack.shape)
+            logger.debug(_initial_condition_stack.shape)
         else:
             _initial_condition_stack = initial_condition_stack
-            print(_initial_condition_stack.shape)
+            logger.debug(_initial_condition_stack.shape)
 
         # ic_sparse = diags(_initial_condition_stack.data, shape=(cm.shape), format='coo')
         # replaced by a sparse row vector: ic_sparse.dot(cm).sum(0) was only ever computing
@@ -1824,11 +1850,11 @@ class PMAR(object):
                 total = ic_vec.copy()  # i=0 term: cm**0 = I, so v @ I = v
                 for _ in range(1,k):
                     current = current.dot(cm_csr)
-                    print('current sum =', current.sum(), 'current sum excluding leakage cell =', current[:,:-1].sum())
+                    logger.debug(f'current sum = {current.sum()}, current sum excluding leakage cell = {current[:,:-1].sum()}')
                     total = total + current
-                    print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
+                    logger.debug(f'total sum = {total.sum()}, current sum excluding leakage cell = {total[:,:-1].sum()}')
                 cm_prediction_sparse = total
-                print('total sum =', total.sum(), 'current sum excluding leakage cell =', total[:,:-1].sum())
+                logger.debug(f'total sum = {total.sum()}, current sum excluding leakage cell = {total[:,:-1].sum()}')
             else:
                 # cm = matrix_power(cm, k)
                 # incremental vector propagation instead of forming cm**k as a full matrix
@@ -1846,7 +1872,7 @@ class PMAR(object):
         # adding maxbin to exclude "dummy" node before reprojection
         cm_prediction = xr.DataArray(cm_prediction_sparse.toarray()[0][:maxbin+1],
                               coords = dict(destination=initial_condition_stack.rename({'origin':'destination', 'x_c':'x', 'y_c':'y'}).destination)).unstack().sortby('x').sortby('y').rio.write_crs(4326).rio.reproject_match(self.grid.mask)
-        print(cm_prediction.sum().data)
+        logger.debug(cm_prediction.sum().data)
         # reproject match is needed to avoid tiny discrepancies in precision of x,y variables which cause the grids to mismatch
         
         self.cm_prediction = cm_prediction
@@ -1878,7 +1904,7 @@ class PMAR(object):
         if cm is None:
             cm = self.cm
 
-        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == -1234.0:
+        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
             cm = self.cm.tocsr()[:-1,:-1]
             
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges; 'p' for transition probability, matching connectivity_analysis()
@@ -1969,70 +1995,76 @@ class PMAR(object):
 
         return network_to_geojson(G, node_shapes, out_path=out_path, weight_attr=weight_attr, curvature=curvature, self_loop_radius=self_loop_radius, n_points=n_points, include_nodes=include_nodes, style=style, width_range=width_range, p_range=p_range, cmap=cmap, draw_arrows=draw_arrows, self_loop_arrow=self_loop_arrow, arrow_length_range=arrow_length_range, arrow_width_range=arrow_width_range, target_gap=target_gap)
 
+    # Quarantined (AUDIT.md P0): confirmed broken -- calls self.get_histogram(...,
+    # weight=...), but get_histogram's actual parameter is `weighted` (no `weight` kwarg
+    # exists), so every call here raises TypeError. The bare except below previously
+    # masked this as a misleading "no weight variable found" warning. Deferred to a
+    # dedicated fix pass rather than guessing at a repair here.
     # this is a histogram with a "distinct" on trajectories. i.e. if a particle stays in same cell for multiple timesteps, it doesn't get doublecounted.
-    # note that this method fails if a trajectory goes back to same cell after a period of time. 
-    def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
-        """
-        Compute, per grid cell, the (optionally weighted) fraction of a trajectory's total
-        time steps that were spent in that cell, summed over all trajectories.
+    # note that this method fails if a trajectory goes back to same cell after a period of time.
+    # def _traj_per_bin(self, res, study_area=None, use=None):#, weighted=False):
+    #     """
+    #     Compute, per grid cell, the (optionally weighted) fraction of a trajectory's total
+    #     time steps that were spent in that cell, summed over all trajectories.
+    #
+    #     Parameters
+    #     ----------
+    #     res : float
+    #         Resolution used to bin trajectories (passed to get_histogram).
+    #     study_area : list, optional
+    #         Spatial bounds for the grid. Default is None.
+    #     use : str, optional
+    #         Path to a use raster; if given, weights are (re)computed via set_weights before
+    #         binning. Default is None (uses self.ds.weight if present, else unweighted).
+    #
+    #     Returns
+    #     -------
+    #     xr.DataArray
+    #         Per-cell time-fraction, summed over trajectories.
+    #     """
+    #     counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
+    #
+    #     if use is not None:
+    #         weights = self.set_weights(res=res, study_area=study_area, use=use, normalize=False, assign=True)
+    #
+    #     # this way, it will take the weight
+    #     try:
+    #         h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'], block_size=len(self.ds.trajectory))
+    #     except:
+    #         h = self.get_histogram(res, dim=['time'], block_size=len(self.ds.trajectory))
+    #         logger.warning('No weight variable was found. Calculating unweighted histogram.')
+    #         #h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'])
+    #
+    #     tpb = h/counts_per_cell
+    #
+    #     return tpb.fillna(0.).sum('trajectory')
 
-        Parameters
-        ----------
-        res : float
-            Resolution used to bin trajectories (passed to get_histogram).
-        study_area : list, optional
-            Spatial bounds for the grid. Default is None.
-        use : str, optional
-            Path to a use raster; if given, weights are (re)computed via set_weights before
-            binning. Default is None (uses self.ds.weight if present, else unweighted).
-
-        Returns
-        -------
-        xr.DataArray
-            Per-cell time-fraction, summed over trajectories.
-        """
-        counts_per_cell = self.get_histogram(res, weight=1, dim=['time']) # this gives me, for each trajectory, the count of how many tsteps it has spent in each cell
-        
-        if use is not None:
-            weights = self.set_weights(res=res, study_area=study_area, use=use, normalize=False, assign=True)
-
-        # this way, it will take the weight 
-        try:
-            h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'], block_size=len(self.ds.trajectory)) 
-        except:
-            h = self.get_histogram(res, dim=['time'], block_size=len(self.ds.trajectory)) 
-            logger.warning('No weight variable was found. Calculating unweighted histogram.')
-            #h = self.get_histogram(res, weight=self.ds.weight.fillna(0.), dim=['time'])
-        
-        tpb = h/counts_per_cell
-
-
-
-        return tpb.fillna(0.).sum('trajectory')
-
-    def traj_density(self, res, study_area=None): # similar to emodnet route density
-        """
-        Compute a "distinct trajectory density" (route density) raster, similar to EMODnet
-        route density: repeated same-cell visits by a single trajectory are deduplicated
-        before binning, so a trajectory lingering in a cell doesn't inflate its density.
-
-        Parameters
-        ----------
-        res : float
-            Resolution used to bin trajectories.
-        study_area : list, optional
-            Spatial bounds for the grid. Default is None.
-
-        Returns
-        -------
-        xr.DataArray
-            Histogram of deduplicated per-trajectory weights per grid cell.
-        """
-        w = self.set_weights(1)
-        self.ds = self.get_bin_n(res=res, t='all')
-        w_distinct = xr.apply_ufunc(traj_distinct, self.ds.bin_n.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), w.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), input_core_dims = [['time'],['time']], output_core_dims = [['time']], vectorize=True, dask='parallelized')
-        h_distinct = self.get_histogram(res=res, study_area=study_area, weight=w_distinct, block_size='auto')
-        return h_distinct
+    # Quarantined (AUDIT.md P0): confirmed broken -- calls self.set_weights(1) (sets
+    # res=1, not a weight) and self.get_histogram(..., weight=...) (nonexistent kwarg,
+    # same bug as _traj_per_bin above). Deferred to a dedicated fix pass.
+    # def traj_density(self, res, study_area=None): # similar to emodnet route density
+    #     """
+    #     Compute a "distinct trajectory density" (route density) raster, similar to EMODnet
+    #     route density: repeated same-cell visits by a single trajectory are deduplicated
+    #     before binning, so a trajectory lingering in a cell doesn't inflate its density.
+    #
+    #     Parameters
+    #     ----------
+    #     res : float
+    #         Resolution used to bin trajectories.
+    #     study_area : list, optional
+    #         Spatial bounds for the grid. Default is None.
+    #
+    #     Returns
+    #     -------
+    #     xr.DataArray
+    #         Histogram of deduplicated per-trajectory weights per grid cell.
+    #     """
+    #     w = self.set_weights(1)
+    #     self.ds = self.get_bin_n(res=res, t='all')
+    #     w_distinct = xr.apply_ufunc(traj_distinct, self.ds.bin_n.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), w.chunk(chunks={'time': -1, 'trajectory': int(len(self.ds.trajectory)/10)}), input_core_dims = [['time'],['time']], output_core_dims = [['time']], vectorize=True, dask='parallelized')
+    #     h_distinct = self.get_histogram(res=res, study_area=study_area, weight=w_distinct, block_size='auto')
+    #     return h_distinct
 
 
     def write_tiff(self, h, crs=4326, path=None, description=None, output_dir=None):# instead of use label, could do 'assign_attrs' for any attributes, including use_label, i might want to add

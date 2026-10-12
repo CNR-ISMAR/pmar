@@ -18,7 +18,7 @@ rainbow = Colormap('tol:rainbow_PuRd').to_mpl()
 tol_div = Colormap('tol:BuRd').to_mpl()
 rocket_r = sns.color_palette('rocket_r', as_cmap=True)
 
-def plot_map(subplot_rows=1, subplot_cols=1, sharex=False, sharey=False, proj=cartopy.crs.PlateCarree(), extent=None, coastres='10m', figsize=[8,6], title='', filename=None, top_labels=False, right_labels=False, left_labels=True, bottom_labels=True):
+def plot_map(subplot_rows=1, subplot_cols=1, sharex=False, sharey=False, proj=cartopy.crs.PlateCarree(), extent=None, coastres='10m', figsize=[8,6], title='', filename=None, top_labels=False, right_labels=False, left_labels=True, bottom_labels=True, dpi=160):
     """
     Create a base map (or grid of subplots) with cartopy coastlines, land, borders and
     gridlines, ready to plot data onto.
@@ -75,7 +75,7 @@ def plot_map(subplot_rows=1, subplot_cols=1, sharex=False, sharey=False, proj=ca
         ax.set_title(title)
 
     if filename is not None:
-        plt.savefig(str(filename), dpi=160, bbox_inches='tight')
+        plt.savefig(str(filename), dpi=dpi, bbox_inches='tight')
     
     return fig, axs
 
@@ -286,24 +286,26 @@ def _plot_network(G, node_shapes=None, node_size=5, show_map=False, node_color='
     
 
 
-def custom_plotfunc(ds, fig, tt, *args, **kwargs):
-    '''
-    For pmar.animate. WIP.
-    '''
-    
-    ax = fig.subplots(subplot_kw={'projection':cartopy.crs.PlateCarree()})
-    ax.coastlines('10m', zorder=12, color='k', linewidth=.7)
-    ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2)
-    ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
-    gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
-    #levels=np.array([1,10,100,1000])
-    gl.top_labels = False
-    gl.right_labels = False
-
-    # Colorlimits need to be fixed or your video is going to cause seizures.
-    ds.isel(time=tt).plot(ax=ax, cmap=spectral_r, vmin=0, vmax=ds.max())
-    ax.set_title('');
-    return None, None
+# Quarantined: WIP and never called, and references an undefined name (`spectral_r`,
+# not defined/imported anywhere) that would raise NameError if it ever were called.
+# def custom_plotfunc(ds, fig, tt, *args, **kwargs):
+#     '''
+#     For pmar.animate. WIP.
+#     '''
+#
+#     ax = fig.subplots(subplot_kw={'projection':cartopy.crs.PlateCarree()})
+#     ax.coastlines('10m', zorder=12, color='k', linewidth=.7)
+#     ax.add_feature(cartopy.feature.LAND, facecolor='0.9', zorder=2)
+#     ax.add_feature(cartopy.feature.BORDERS, zorder=11, linewidth=.5, linestyle=':')
+#     gl = ax.gridlines(draw_labels=True, dms=False, x_inline=False, y_inline=False, linewidth=0, color='gray', linestyle='--')
+#     #levels=np.array([1,10,100,1000])
+#     gl.top_labels = False
+#     gl.right_labels = False
+#
+#     # Colorlimits need to be fixed or your video is going to cause seizures.
+#     ds.isel(time=tt).plot(ax=ax, cmap=spectral_r, vmin=0, vmax=ds.max())
+#     ax.set_title('');
+#     return None, None
 
 def plot(self, raster, title=None, xlim=None, ylim=None, cmap=None, shading='flat', vmin=None, vmax=None, norm=None, coastres='10m', proj=cartopy.crs.epsg(3857), transform=cartopy.crs.PlateCarree(), dpi=120, figsize=[10,7], rivers=False, savepng=None):
     """
@@ -415,7 +417,7 @@ def plot(self, raster, title=None, xlim=None, ylim=None, cmap=None, shading='fla
 
     if savepng is not None:
         #Path(basedir / 'thumbnails').mkdir(parents=True, exist_ok=True) # useful for geoplatform to keep them in same dir as raster
-        plt.savefig(str(savepng), dpi=160, bbox_inches='tight')
+        plt.savefig(str(savepng), dpi=dpi, bbox_inches='tight')
 
     return fig, ax
 
@@ -519,7 +521,7 @@ def plot_scatter(ds, t=None, xlim=None, ylim=None, s=1, alpha=1, c='age', cmap='
     plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
     
     if save_to is not None:
-        plt.savefig(save_to, dpi=160, bbox_inches='tight')
+        plt.savefig(save_to, dpi=dpi, bbox_inches='tight')
     
     return fig, ax
 

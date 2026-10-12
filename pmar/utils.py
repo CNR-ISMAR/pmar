@@ -50,7 +50,7 @@ SPATIAL_DOMAINS = {'global':
                 {'readers':
                  {'physics': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
-                  'waves': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
+                  'waves': 'cmems_mod_med_wav_my_4.2km_PT1H-i',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
                   'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                   'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
                  },
@@ -495,11 +495,17 @@ def _wfs_has_features(name, bbox, wfs_url):
             'TYPENAMES': name, 'BBOX': bbox_str, 'RESULTTYPE': 'hits',
         }, timeout=30)
         resp.raise_for_status()
-        match = re.search(r'numberMatched="(\d+)"', resp.text)
-        if match is None:
+        # AUDIT.md fragile spot: parse with ElementTree (consistent with the rest of this
+        # file) instead of a regex over the raw XML text, which breaks if the attribute's
+        # formatting/whitespace ever differs
+        try:
+            number_matched = ET.fromstring(resp.text).attrib.get('numberMatched')
+        except ET.ParseError:  # malformed/unexpected XML body -- same fallback as a missing attribute below
+            number_matched = None
+        if number_matched is None:
             logger.warning(f"could not parse feature count for '{name}'; keeping it in the list.")
             return True
-        return int(match.group(1)) > 0
+        return int(number_matched) > 0
     except requests.RequestException as e:
         logger.warning(f"feature-count check failed for '{name}' ({e}); keeping it in the list.")
         return True
@@ -544,7 +550,7 @@ def list_emodnet_uses(bbox, wfs_url=EMODNET_HA_WFS_URL, wcs_url=EMODNET_HA_WCS_U
     bbox_poly = box(*bbox)
     rows = []
 
-    wfs = WebFeatureService(wfs_url, version='2.0.0')
+    wfs = WebFeatureService(wfs_url, version='2.0.0', timeout=30)  # explicit timeout (AUDIT.md fragile spot), matching the requests.get calls elsewhere in this file
     wfs_candidates = []
     for name, layer in wfs.contents.items():
         if layer.boundingBoxWGS84 is None:
@@ -735,28 +741,28 @@ def harmonize_use(use, res, study_area, like, tstep=None):
         If use is a GeoDataFrame with more than one non-geometry column (ambiguous which
         column to burn), or with no non-geometry column at all.
     '''
-    try:
-        #Path(use).suffix
-        if Path(use).suffix == '.shp':
+    # AUDIT.md fragile spot: dispatch on the actual type of `use` explicitly instead of
+    # using a bare `except:` as control flow -- that previously masked real errors and,
+    # when `use` matched none of the expected cases, left `raster_use` unbound (raising a
+    # confusing UnboundLocalError below instead of a clear message about what went wrong).
+    if isinstance(use, str):  # use is a path: dispatch on its file extension
+        suffix = Path(use).suffix
+        if suffix == '.shp':
             logger.debug('use is shapefile')
-            vector_use = gpd.read_file(use)
-            #logger.debug('SHP USE TOTAL BOUNDS', vector_use.total_bounds)
-        elif Path(use).suffix == '.tif':
-            raster_use = rxr.open_rasterio(use).squeeze()
-            #logger.debug('TIF USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data)            
+            vector_use = gpd.read_file(use)  # read the shapefile into a GeoDataFrame
+        elif suffix == '.tif':
             logger.debug('use is tif')
-
-    except:     
-        if type(use) is gpd.geodataframe.GeoDataFrame:
-            logger.debug('use is geopandas dataframe')
-            vector_use = use
-            #logger.debug('GPD USE TOTAL BOUNDS', vector_use.total_bounds)
-        elif type(use) is xr.core.dataarray.DataArray:
-            logger.debug('use is xarray')
-            raster_use = use
-            #logger.debug('RXR USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
+            raster_use = rxr.open_rasterio(use).squeeze()  # open the GeoTIFF as a DataArray
         else:
-            logger.debug('use is none of the above')
+            raise ValueError(f"Unrecognised use file suffix '{suffix}'. Expected '.shp' or '.tif'.")  # unknown extension: fail clearly instead of leaving raster_use unset
+    elif isinstance(use, gpd.GeoDataFrame):  # use was already passed in as a GeoDataFrame
+        logger.debug('use is geopandas dataframe')
+        vector_use = use
+    elif isinstance(use, xr.DataArray):  # use was already passed in as a raster DataArray
+        logger.debug('use is xarray')
+        raster_use = use
+    else:
+        raise ValueError(f"Unrecognised 'use' type {type(use)}. Must be a path to a '.shp'/'.tif' file, a geopandas GeoDataFrame, or an xarray DataArray.")  # nothing matched: fail clearly instead of leaving raster_use unset
 
     if 'vector_use' in locals():
         if len(list(vector_use.columns.drop('geometry'))) > 1:
@@ -765,33 +771,29 @@ def harmonize_use(use, res, study_area, like, tstep=None):
             raise ValueError('No columns found other than geometry. No values to burn into raster cells.')
         raster_use = rasterize_conserve(vector_use, like=like, column_to_burn=list(vector_use.columns.drop('geometry'))[0]).rio.reproject_match(like)
         logger.debug(f'rasterized vector_use to res = {res}')
-        #logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
 
     raster_use = raster_use.rio.reproject('epsg:4326', nodata=0).sortby('x').sortby('y').sel(x=slice(study_area[0], study_area[2]), y=slice(study_area[1], study_area[3])).fillna(0) # fillna is needed so i dont get nan values in the resampled sum
     logger.debug('use_raster successfully reprojected')
-    logger.debug('Rasterized USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data)         
+    logger.debug(f'rasterized USE total bounds: x=[{raster_use.x.min().data}, {raster_use.x.max().data}], y=[{raster_use.y.min().data}, {raster_use.y.max().data}]')  # f-string, not a buggy multi-arg logger.debug() call
 
     # need a dataarray
     raster_use = rasterhd2raster(raster_use, like) # resample the use raster on our grid, with user-defined res and crs
-    logger.debug('Resampled USE TOTAL BOUNDS', raster_use.x.min().data, raster_use.x.max().data, raster_use.y.min().data, raster_use.y.max().data) 
+    logger.debug(f'resampled USE total bounds: x=[{raster_use.x.min().data}, {raster_use.x.max().data}], y=[{raster_use.y.min().data}, {raster_use.y.max().data}]')  # same fix as above
     logger.debug('use_raster successfully resampled')
-    # if len(use.shape) > 2:
-    #     use = use[0]
-        
-    raster_use = raster_use.where(raster_use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0. 
-    
+
+    raster_use = raster_use.where(raster_use>=0,0) # rasterhd2raster sometimes gives small negative values when resampling. I am filling those with 0.
+
     # reproject should be done at the end to ensure matching coords
     raster_use = raster_use.rio.reproject_match(like)
-   
+
     # convert use from quantity/day into quantity/timestep
     if tstep is not None:
         logger.warning('Make sure use is provided per day.')
-        timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds 
+        timesteps_per_day = 24*60*60/tstep # tstep must be given in seconds
         raster_use = raster_use / timesteps_per_day
-    
+
     logger.debug(f'final use has shape {raster_use.shape}')
     return raster_use
-    del vector_use, raster_use
 
 
 def check_particle_file(path_to_file):
