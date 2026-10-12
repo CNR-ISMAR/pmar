@@ -500,7 +500,10 @@ class PMAR(object):
         self.seed_within_bounds = seed_within_bounds
         logger.debug(f'seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
 
-        file_path, file_exists = self.cache.particle_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seed_from_file=seed_from_file, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
+        # context is just the resolved set of dataset ids actually read (by value, not by the
+        # readers dict's arbitrary key names), so cosmetic SPATIAL_DOMAINS edits (renaming a
+        # reader key, rewording 'desc', tweaking 'extent') never invalidate existing cache entries
+        file_path, file_exists = self.cache.particle_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seed_from_file=seed_from_file, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
@@ -1150,7 +1153,7 @@ class PMAR(object):
             
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
 
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         #self.ppi_list.append(ppi_path)
         
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
@@ -2236,7 +2239,7 @@ class PMARmulti(PMAR):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         if not self.output:
             self.output = xr.Dataset()
@@ -2266,7 +2269,42 @@ class PMARmulti(PMAR):
             self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding) # divide by n of seedings
             self.write_tiff(self.output['ppi'], path=ppi_path)
             self.ppi_path = ppi_path
-    
+
+
+    def get_indicators(self):
+        """
+        Compute summary indicator rasters (SUM, MAX, and a quantile) from the
+        trajectory histograms obtained from each seeding, and store them in self.output.
+
+        Parameters
+        ----------
+        res : float
+            Resolution used to bin trajectories (passed to get_histogram).
+        study_area : list
+            Spatial bounds [xmin, ymin, xmax, ymax] for the grid.
+        quantile : float, optional
+            Quantile (over time) to compute in addition to SUM/MAX. Default is 0.9, stored
+            as self.output['Q90'].
+
+        Notes
+        -----
+        Sets self.output['SUM'], self.output['MAX'], and self.output[f'Q{quantile*100}'],
+        each reprojected to match self.grid.mask.
+        """
+        # other indicators
+        if hasattr(self.ds, 'weight'):
+            weighted = True
+        else:
+            weighted = False
+            
+        _h = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time), dim=['trajectory', 'time'], weighted=weighted)
+
+        if not self.output:
+            self.output = xr.Dataset()
+        
+        self.output['SUM'] = _h.sum('time').rio.reproject_match(self.grid.mask)
+        self.output['MAX'] = _h.max('time').rio.reproject_match(self.grid.mask)
+        self.output[f'Q{str(int(quantile*100))}'] = _h.quantile(q=quantile, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
 
     def sum_seedings(self, rep_path):
         '''
@@ -2367,7 +2405,7 @@ class PMARmulti(PMAR):
 
         self.ppi_cache = PMARCache(ppi_output_dir)
              
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=self.spatial_domain, pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         if not self.output:
             self.output = xr.Dataset()

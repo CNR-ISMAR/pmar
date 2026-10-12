@@ -102,7 +102,7 @@ SPATIAL_DOMAINS = {'global':
                           'bathymetry':'cmems_mod_ibi_phy_my_0.027deg-3D_static'},
                 },
                 'atlantic-european':
-                {'extent': [-19.89, 40.07, 13.0, 65.0], # NWSHELF_MULTIYEAR_PHY_004_009 domain
+                {'extent': [-19.89, 46.0, 13.0, 65.0], # NWSHELF_MULTIYEAR_PHY_004_009 domain is [-19.89, 40.07, 13.0, 65.0]; southern bound raised to 46.0 so this rectangle no longer spuriously overlaps the Mediterranean/Adriatic bounding box at lon 12-13° (that southern sliver is redundantly covered by 'atlantic-iberian' anyway)
                 'desc': 'CMEMS Atlantic - European North West Shelf (NWS) \nNWS Ocean Physics Reanalysis, daily, 7km res, 24 z-levels, 1 Jan 1993 to present \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nNWS Ocean Wave Reanalysis, 3-hourly, 1.5km res, 1 Jan 1980 to present',
                 'readers':{'physics':'cmems_mod_nws_phy-uv_my_7km-2D_PT1H-i',
                           'winds':'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',
