@@ -36,12 +36,12 @@ EMODNET_HITS_WORKERS = 20  # concurrency for list_emodnet_uses' per-layer featur
 
 SPATIAL_DOMAINS = {'global':
                    {'extent': [-180, -80, 179.92, 90],
-                'label': 'CMEMS_Global_Renalysis',
+                'desc': 'CMEMS global \nGlobal physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30 \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nGlobal ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025',
                                 'readers':
                  {'physics': 'cmems_mod_glo_phy_my_0.083deg_P1D-m', # global physics reanalysis, daily, 1/12° horizontal resolution, 50 vertical levels, 1 Jan 1993 to 2021-06-30
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # L4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024
                   'waves': 'cmems_mod_glo_wav_my_0.2deg_PT3H-i', # global ocean waves reanalysis, 3-hourly, 1 Jan 1980 to 31 Jan 2025
-                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                   'bathymetry':'cmems_mod_glo_phy_my_0.083deg_static', # global physics reanalysis static, same as physics
                  },
 },
@@ -51,11 +51,11 @@ SPATIAL_DOMAINS = {'global':
                  {'physics': 'cmems_mod_med_phy-cur_my_4.2km_PT1H-m', # change H to D to get daily. Mediterranean Sea Physics Reanalysis, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4
                   'waves': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',   # Mediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025
-                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                   'bathymetry': 'cmems_mod_med_phy_my_4.2km_static', # Mediterranean Sea Physics Reanalysis
                  },
                  'extent': [-6, 30.19, 36.29, 45.98],
-                'label': 'CMEMS_Mediterranean_Renalysis'
+                'desc': 'CMEMS Mediterranean \nMediterranean Sea Physics Reanalysis, hourly, 1/24˚res, 141 z-levels, 1 Jan 1987 to 1 Feb 2025 \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nMediterranean Sea Waves Reanalysis, hourly, 1/24˚res, 1 Jan 1985 to 1 Mar 2025'
                 },
 
                 'black sea':
@@ -63,11 +63,11 @@ SPATIAL_DOMAINS = {'global':
                  {'physics': 'cmems_mod_blk_phy-cur_my_2.5km_P1D-m', #Black Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
                   'waves': 'cmems_mod_blk_wav_my_2.5km_PT1H-i',  # Black Sea Waves Reanalysis
-                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                   'bathymetry': 'cmems_mod_blk_phy_my_2.5km_static',  # Black Sea Physics Reanalysis
                  },
                 'extent': [27.25, 40.5, 42, 47],
-                'label': 'CMEMS_Black_Sea_Renalysis'
+                'desc': 'CMEMS Black Sea \nBlack Sea Physics Reanalysis, res 1/40º, 121 z-levels, 1 Jan 1993 to 1 Feb 2025 \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nBlack Sea Waves Reanalysis'
                 },
 
                 'baltic':
@@ -75,13 +75,42 @@ SPATIAL_DOMAINS = {'global':
                  {'physics': 'cmems_mod_bal_phy_my_P1D-m', #Baltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023
                   'winds': 'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H', # global L4,
                   'waves': 'cmems_mod_bal_wav_my_PT1H-i',
-                  'biogeochem': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                  'spm': 'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
                   'bathymetry': 'cmems_mod_bal_phy_my_static', #Baltic Sea Physics Reanalysis,
                  },
                  'extent': [9.04, 53.01, 30.21, 65.89],
-                'label': 'CMEMS_Baltic_Sea_Renalysis'
-                }
-                                    
+                'desc': 'CMEMS Baltic Sea \nBaltic Sea Physics Reanalysis, 2x2km, 56 depth-levels, 1 Jan 1993 to 31 Dec 2023 \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 '
+                },
+
+                'arctic':
+                {'extent': [-180, 50, 179.88, 90], # lat 50° to 90°, lon -180° to 179.88°
+                'desc': 'CMEMS Arctic \nArctic Ocean Physics Reanalysis (TOPAZ4b), daily, ~12.5km resolution, 50 hybrid z-isopycnal levels, 1 Jan 1991 to present \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nArctic Ocean Wave Hindcast, hourly, 3km res, 1 Jan 1964 to present',
+                'readers':{'physics':'cmems_mod_arc_phy_my_topaz4_P1D-m',
+                          'winds':'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',
+                          'waves':'cmems_mod_arc_wav_my_3km_PT1H-i',
+                          'spm':'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                          # no 'bathymetry': TOPAZ4b has no distinct static/bathymetry dataset in the CMEMS catalogue
+                          },
+                },
+                'atlantic-iberian':
+                {'extent': [-19.08, 26.17, 5.08, 56.08], # IBI_MULTIYEAR_PHY_005_002 native grid bounds
+                'desc': 'CMEMS Atlantic - Iberian Biscay Ireland (IBI) \nIBI Ocean Physics Reanalysis, hourly, 1/36° (~3km) res, 50 z-levels, 1 Jan 1993 to present \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nIBI Ocean Wave Reanalysis, hourly, 1/36° res, 1 Jan 1980 to present',
+                'readers':{'physics':'cmems_mod_ibi_phy-cur_my_0.027deg_PT1H-m',
+                          'winds':'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',
+                          'waves':'cmems_mod_ibi_wav_my_0.027deg_PT1H-i', # IBI_MULTIYEAR_WAV_005_006
+                          'spm':'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                          'bathymetry':'cmems_mod_ibi_phy_my_0.027deg-3D_static'},
+                },
+                'atlantic-european':
+                {'extent': [-19.89, 40.07, 13.0, 65.0], # NWSHELF_MULTIYEAR_PHY_004_009 domain
+                'desc': 'CMEMS Atlantic - European North West Shelf (NWS) \nNWS Ocean Physics Reanalysis, daily, 7km res, 24 z-levels, 1 Jan 1993 to present \nL4 sea surface wind and stress fields 0.125° res, hourly, 1 Jun 1994 to 21 Nov 2024 \nNWS Ocean Wave Reanalysis, 3-hourly, 1.5km res, 1 Jan 1980 to present',
+                'readers':{'physics':'cmems_mod_nws_phy-uv_my_7km-2D_PT1H-i',
+                          'winds':'cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H',
+                          'waves':'MetO-NWS-WAV-RAN', # will be retired on 24/11/2025 
+                          'spm':'cmems_obs-oc_glo_bgc-transp_my_l4-multi-4km_P1M',
+                          'bathymetry':'cmems_mod_nws_phy_my_7km-3D_static'
+                          },
+                },
                   }
 
 
@@ -92,16 +121,17 @@ def get_copernicus(spatial_domain):
     Parameters
     ----------
     spatial_domain : str
-        Name of the ocean basin to retrieve Copernicus data for. One of 'global', 'med',
-        'black sea' or 'baltic'.
+        Name of the ocean basin to retrieve Copernicus data for. One of
+        SPATIAL_DOMAINS.keys(), e.g. 'global', 'med', 'black sea', 'baltic', 'arctic',
+        'atlantic-iberian' or 'atlantic-european'.
 
     Returns
     -------
     dict
-        Dictionary with keys 'readers' (a dict mapping variable name, e.g. 'currents',
-        'winds', 'bathymetry', 'mixed-layer', 'stokes', to its Copernicus Marine dataset
-        id), 'extent' (the basin's spatial extent as [xmin, ymin, xmax, ymax]) and 'label'
-        (a human-readable name for the basin).
+        Dictionary with keys 'readers' (a dict mapping variable name, e.g. 'physics',
+        'winds', 'waves', 'spm', 'bathymetry', to its Copernicus Marine dataset id),
+        'extent' (the basin's spatial extent as [xmin, ymin, xmax, ymax]) and 'desc' (a
+        short multi-line description of the underlying datasets).
 
     Raises
     ------
@@ -110,7 +140,7 @@ def get_copernicus(spatial_domain):
     """
 
     if spatial_domain not in SPATIAL_DOMAINS.keys():
-        raise ValueError('Unsupported context. Please insert one of "global", "med", "black sea", "baltic".')
+        raise ValueError(f'Unsupported context. Please insert one of {list(SPATIAL_DOMAINS.keys())}.')
 
     return SPATIAL_DOMAINS[spatial_domain]
 
@@ -137,7 +167,7 @@ def select_spatial_domain(bounds):
     dict
         Dictionary shaped like get_copernicus()'s return value: 'readers' (merged dict of
         dataset ids, keyed by f'{basin_name}:{variable}' and deduplicated by dataset id),
-        'extent' (bounding box of the merged basins' extents) and 'label' (names of the
+        'extent' (bounding box of the merged basins' extents) and 'desc' (names of the
         merged basins).
     """
     seeding_box = box(*bounds)
@@ -172,7 +202,7 @@ def select_spatial_domain(bounds):
     return {
         'readers': merged_readers,
         'extent': list(merged_extent),
-        'label': 'auto: ' + ' + '.join(matched_basins),
+        'desc': 'auto: ' + ' + '.join(matched_basins),
     }
 
 

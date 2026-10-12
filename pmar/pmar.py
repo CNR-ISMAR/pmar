@@ -485,7 +485,7 @@ class PMAR(object):
             seeding_bounds = seed_within_bounds if seed_within_bounds is not None else gpd.read_file(seeding_shapefile).total_bounds
             self.spatial_domain = select_spatial_domain(seeding_bounds)
             self.extent = self.spatial_domain['extent']
-            logger.info(f"auto-selected spatial_domain: {self.spatial_domain['label']}")
+            logger.info(f"auto-selected spatial_domain: {self.spatial_domain['desc']}")
 
         if seed_within_bounds is not None:
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
