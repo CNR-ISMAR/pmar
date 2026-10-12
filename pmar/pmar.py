@@ -408,9 +408,44 @@ class PMAR(object):
         Sometimes opendrift runs end early because e.g. all particles have beached, resulting in seedings with different time lengths. This method pads all seedings so that they all have same time length (determined with find_correct_len).
         '''
         return ds.pad(pad_width={'time': (0, correct_len-len(ds.time))}, mode='edge')
-         
-    
-    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), duration_days=30, seeding_shapefile = None, seed_within_bounds=None, seed_from_file=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+
+    def _resolve_spatial_domain(self, seeding_shapefile=None, seed_within_bounds=None):
+        '''
+        Resolve self.spatial_domain from the 'auto' sentinel into a concrete basin dict (via
+        pmar.utils.select_spatial_domain), if it hasn't been resolved already. No-op if
+        self.spatial_domain is already a dict.
+
+        Needed by any method that reads self.spatial_domain['readers'] (e.g. for a cache key)
+        before get_trajectories() has necessarily run yet to resolve it -- notably
+        PMARmulti.run(), which checks its PPI cache before deciding whether to call
+        get_trajectories() at all (and so may skip it entirely on a cache hit).
+
+        Parameters
+        ----------
+        seeding_shapefile : str, optional
+            Path to a shapefile to derive seeding bounds from, if seed_within_bounds isn't
+            given. Default is None.
+        seed_within_bounds : list, optional
+            Spatial bounds [xmin, ymin, xmax, ymax] to auto-select the covering basin(s) from.
+            Default is None.
+
+        Raises
+        ------
+        ValueError
+            If self.spatial_domain is 'auto' and neither seeding_shapefile nor
+            seed_within_bounds is given (there is no seeding location to auto-detect from).
+        '''
+        if self.spatial_domain != 'auto':
+            return
+        if seed_within_bounds is None and seeding_shapefile is None:
+            raise ValueError("spatial_domain='auto' requires seed_within_bounds or seeding_shapefile to be given, since there is no seeding location to auto-detect a basin from.")
+        seeding_bounds = seed_within_bounds if seed_within_bounds is not None else gpd.read_file(seeding_shapefile).total_bounds
+        self.spatial_domain = select_spatial_domain(seeding_bounds)
+        self.extent = self.spatial_domain['extent']
+        logger.info(f"auto-selected spatial_domain: {self.spatial_domain['desc']}")
+
+
+    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), duration=30, seeding_shapefile = None, seed_within_bounds=None, seed_from_file=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
         """
         Calculate trajectories using Oceandrift module by OpenDrift (MET Norway).
         Uses OceanDrift module. 
@@ -429,7 +464,7 @@ class PMAR(object):
             The start date of the simulation, in string format 'dd-mm-yyyy'
         seed_time : timedelta, optional
             for continuous release of particles
-        duration_days : int, optional
+        duration : int, optional
             Integer defining the length, or duration, of the particle simulation in days. Default is 30 (to be used for test run)
         seeding_shapefile : str, optional
             Path to a shapefile containing geometries to seed within. Default is None,  i.e. the whole basin is covered.
@@ -469,7 +504,7 @@ class PMAR(object):
         self.pnum = pnum
         self.start_time = start_time
         self.seed_time = seed_time
-        self.duration = duration_days
+        self.duration = duration
 
         #### SPATIAL DOMAIN
         # establish study area
@@ -481,11 +516,7 @@ class PMAR(object):
                 raise ValueError("spatial_domain='auto' requires seed_within_bounds or seeding_shapefile to be given, since there is no seeding location to auto-detect a basin from.")
             seed_within_bounds = self.spatial_domain['extent']
 
-        if self.spatial_domain == 'auto':
-            seeding_bounds = seed_within_bounds if seed_within_bounds is not None else gpd.read_file(seeding_shapefile).total_bounds
-            self.spatial_domain = select_spatial_domain(seeding_bounds)
-            self.extent = self.spatial_domain['extent']
-            logger.info(f"auto-selected spatial_domain: {self.spatial_domain['desc']}")
+        self._resolve_spatial_domain(seeding_shapefile, seed_within_bounds)
 
         if seed_within_bounds is not None:
             poly_path = f'polygon-crs_epsg:{crs}-lon_{np.round(seed_within_bounds[0],4)}_{np.round(seed_within_bounds[2],4)}-lat—{np.round(seed_within_bounds[1],4)}_{np.round(seed_within_bounds[3])}.shp'
@@ -500,10 +531,10 @@ class PMAR(object):
         self.seed_within_bounds = seed_within_bounds
         logger.debug(f'seed_within_bounds = {self.seed_within_bounds}, seeding_shapefile = {self.seeding_shapefile}')
 
-        # context is just the resolved set of dataset ids actually read (by value, not by the
-        # readers dict's arbitrary key names), so cosmetic SPATIAL_DOMAINS edits (renaming a
+        # reader_dataset_ids is just the resolved set of dataset ids actually read (by value, not
+        # by the readers dict's arbitrary key names), so cosmetic SPATIAL_DOMAINS edits (renaming a
         # reader key, rewording 'desc', tweaking 'extent') never invalidate existing cache entries
-        file_path, file_exists = self.cache.particle_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration_days=duration_days, seed_within_bounds=seed_within_bounds, seed_from_file=seed_from_file, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
+        file_path, file_exists, cache_key = self.cache.particle_cache(reader_dataset_ids=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, pnum=pnum, start_time=start_time, seed_time=seed_time, duration=duration, seed_within_bounds=seed_within_bounds, seed_from_file=seed_from_file, seeding_radius=seeding_radius, beaching=beaching, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, stokes_drift=stokes_drift, seeding_id=self.seeding_id)
 
         logger.info(f'particle_path exists = {file_exists}, {file_path}')
         logger.debug(f'seeding_shapefile = {self.seeding_shapefile}')        
@@ -525,7 +556,7 @@ class PMAR(object):
             
             #time_step = tstep
     
-            duration = timedelta(days=duration_days)
+            duration = timedelta(days=duration)
 
             self.tstep = tstep
     
@@ -670,7 +701,9 @@ class PMAR(object):
     
             if hasattr(self.o, 'discarded_readers'):
                 logger.warning(f'Readers {self.o.discarded_readers} were discarded. Particle transport will be affected')
-    
+
+            self.cache.write_metadata(file_path, cache_key) # commit metadata only now that the .nc file is actually on disk
+
             #ds = self.o.result
             #ds['lon'] = ds['lon'].where(ds.status>=0).ffill('time')
             #ds['lat'] = ds['lat'].where(ds.status>=0).ffill('time')
@@ -685,20 +718,20 @@ class PMAR(object):
         
         pass
 
-    def _continue_trajectories(self, seed_from_file, duration_days):
+    def _continue_trajectories(self, seed_from_file, duration):
         '''
         Continue a previous OpenDrift run by re-seeding particles from its output file.
 
         Recovers pnum, start_time, tstep, termvel and beaching config from the attrs/data of
         an existing OpenDrift output file, then calls get_trajectories(seed_from_file=...) to
-        extend the simulation for a further duration_days. USE WITH CAUTION: only the settings
+        extend the simulation for a further duration. USE WITH CAUTION: only the settings
         recovered here are reused; other get_trajectories parameters fall back to defaults.
 
         Parameters
         ----------
         seed_from_file : str
             Path to an existing OpenDrift output netCDF file to resume from.
-        duration_days : int
+        duration : int
             Additional duration, in days, to run the continued simulation for.
 
         Returns
@@ -714,7 +747,7 @@ class PMAR(object):
             beaching = True
         else:
             beaching = False
-        return self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration_days, termvel=termvel, beaching=beaching, seed_from_file=seed_from_file, hdiff=10)
+        return self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration=duration, termvel=termvel, beaching=beaching, seed_from_file=seed_from_file, hdiff=10)
 
     
     def plot_trajectories(self, t=None, filename=None, s=1, c='age', cmap='viridis', alpha=None, proj=None):
@@ -1153,27 +1186,29 @@ class PMAR(object):
             
         self.ppi_cache = PMARCache(Path(self.basedir) / f'ppi-{use_label}')
 
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+        self._resolve_spatial_domain(getattr(self, 'seeding_shapefile', None), getattr(self, 'seed_within_bounds', None))
+        ppi_path, ppi_exists, cache_key = self.ppi_cache.raster_cache(reader_dataset_ids=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=self.pnum, ptot=None, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=None, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
         #self.ppi_list.append(ppi_path)
-        
+
         logger.info(f'ppi_exists = {ppi_exists}, {ppi_path}')
         # calculate ppi
         if not self.output:
             self.output = xr.Dataset()
-            
+
         if ppi_exists == True:
             # use import raster
-            self.output['ppi'] = rxr.open_rasterio(ppi_path).squeeze()
+            self.output['PPI'] = rxr.open_rasterio(ppi_path).squeeze()
         else:
             self.set_weights(res=res, study_area=study_area, use=use, decay_coef=decay_coef, normalize=True, assign=True)
-            
+
             r = self.get_histogram(res=res, study_area=study_area, block_size=len(self.ds.time)).rio.reproject_match(self.grid.mask) #.assign_attrs({'use_path': use_path, 'emission':emission})
-    
+
             ppi = r / len(self.ds.time) # divide by number of timesteps so that it is independent of temporal resolution (timestep)
-                
-            self.output['ppi'] = ppi.rio.reproject_match(self.grid.mask)#.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster 
+
+            self.output['PPI'] = ppi.rio.reproject_match(self.grid.mask)#.rename({'x':'lon', 'y':'lat'}) # changing coordinate names because there was an issue with precision. original dataset coords have higher precision than coords in raster
 
             self.write_tiff(ppi, path=ppi_path)
+            self.ppi_cache.write_metadata(ppi_path, cache_key) # commit metadata only now that the .tif file is actually on disk
         
         self.ppi_path = ppi_path
             
@@ -2108,7 +2143,7 @@ class PMAR(object):
 
         self.res = res
 
-        self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration_days=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, pnum_per_shape=pnum_per_shape)
+        self.get_trajectories(pnum=pnum, start_time=start_time, tstep=tstep, duration=duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, seeding_radius=seeding_radius, beaching=beaching, hdiff=hdiff, pnum_per_shape=pnum_per_shape)
 
             
         self.get_ppi(res=res, study_area=study_area, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef)#, block_size=len(self.ds.time)) # weight have been assigned above, so no need to normalize or apply decay etc.
@@ -2146,7 +2181,7 @@ class PMARmulti(PMAR):
         
 
 
-    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), seedings=1, tshift=0, end_time=None, duration_days=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
+    def get_trajectories(self, pnum, start_time, seed_time=timedelta(days=0), seedings=1, tshift=0, end_time=None, duration=30, study_area=None, seeding_shapefile = None, seed_within_bounds=None, z=-0.5, tstep=timedelta(hours=1), hdiff=10, termvel=0, crs='4326', seeding_radius=0, beaching=False, stokes_drift=False, pnum_per_shape=False):
         """
         Compute trajectories for `seedings` repetitions, each start-time-shifted by tshift
         days from the previous one, and combine them all into self.ds.
@@ -2166,9 +2201,9 @@ class PMARmulti(PMAR):
             Time shift, in days, applied between successive seedings' start times.
             Default is 0.
         end_time : string, optional
-            If given, overrides duration_days: each seeding's duration is computed as
+            If given, overrides duration: each seeding's duration is computed as
             (end_time - that seeding's shifted start_time). Default is None.
-        duration_days : int, optional
+        duration : int, optional
             Duration, in days, of each seeding (ignored if end_time is given). Default is 30.
 
         Notes
@@ -2190,13 +2225,13 @@ class PMARmulti(PMAR):
             if end_time is not None:
                 rep_duration = (datetime.strptime(end_time, '%Y-%m-%d') - start_time_dt).days
             else:
-                rep_duration = duration_days
+                rep_duration = duration
             
             logger.info(f'Starting rep #{self.seeding_id} with start_time = {rep_start_time}, end_time: {end_time}, and duration: {rep_duration}')
             
             #pnum = int(np.round(ptot/seedings)) #  ptot should be split among the seedings
             
-            super().get_trajectories(pnum=pnum, start_time=rep_start_time, seed_time=seed_time, duration_days=rep_duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            super().get_trajectories(pnum=pnum, start_time=rep_start_time, seed_time=seed_time, duration=rep_duration, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
             logger.info(f'Done with rep #{n}.')
             self.particle_list.append(self.particle_path)
 
@@ -2232,14 +2267,15 @@ class PMARmulti(PMAR):
         Notes
         -----
         Checks a raster cache keyed on the multi-seeding config first; if found, loads the
-        cached PPI instead of recomputing. Sets self.output['ppi'], self.ppi_list, and
+        cached PPI instead of recomputing. Sets self.output['PPI'], self.ppi_list, and
         self.ppi_path.
         """
         ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
 
         self.ppi_cache = PMARCache(ppi_output_dir)
-             
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+
+        self._resolve_spatial_domain(getattr(self, 'seeding_shapefile', None), getattr(self, 'seed_within_bounds', None))
+        ppi_path, ppi_exists, cache_key = self.ppi_cache.raster_cache(reader_dataset_ids=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=self.seeding_shapefile, seeding_radius=self.seeding_radius, res=res, pnum=None, ptot=self.pnum, start_time=self.start_time, duration=self.duration, seedings=self.seedings, seeding_id=self.seeding_id, tshift=self.tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         if not self.output:
             self.output = xr.Dataset()
@@ -2247,7 +2283,7 @@ class PMARmulti(PMAR):
         
         if ppi_exists == True:
             logger.info('PPI with requested configurations found in cache.')
-            self.output['ppi'] = rxr.open_rasterio(ppi_path)
+            self.output['PPI'] = rxr.open_rasterio(ppi_path)
         else:
         
             for pfile in self.particle_list:
@@ -2266,12 +2302,13 @@ class PMARmulti(PMAR):
 
             self.import_trajectories(self.particle_list)
             
-            self.output['ppi'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding) # divide by n of seedings
-            self.write_tiff(self.output['ppi'], path=ppi_path)
+            self.output['PPI'] = self.sum_seedings(self.ppi_list).squeeze().rio.reproject_match(self.grid.mask.rename({'y_c':'y','x_c':'x'})).rename({'x':'lon','y':'lat'})/len(self.ds.seeding) # divide by n of seedings
+            self.write_tiff(self.output['PPI'], path=ppi_path)
+            self.ppi_cache.write_metadata(ppi_path, cache_key) # commit metadata only now that the .tif file is actually on disk
             self.ppi_path = ppi_path
 
 
-    def get_indicators(self):
+    def get_indicators(self, res, study_area, quantile=.9):
         """
         Compute summary indicator rasters (SUM, MAX, and a quantile) from the
         trajectory histograms obtained from each seeding, and store them in self.output.
@@ -2302,9 +2339,9 @@ class PMARmulti(PMAR):
         if not self.output:
             self.output = xr.Dataset()
         
-        self.output['SUM'] = _h.sum('time').rio.reproject_match(self.grid.mask)
-        self.output['MAX'] = _h.max('time').rio.reproject_match(self.grid.mask)
-        self.output[f'Q{str(int(quantile*100))}'] = _h.quantile(q=quantile, dim='time').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
+        self.output['SUM'] = _h.sum('seeding').rio.reproject_match(self.grid.mask)
+        self.output['MAX'] = _h.max('seeding').rio.reproject_match(self.grid.mask)
+        self.output[f'Q{str(int(quantile*100))}'] = _h.quantile(q=quantile, dim='seeding').rio.write_crs('epsg:4326').rio.reproject_match(self.grid.mask) # quantile method remove attributes for some reason, even with keep_attrs = True, so have to re-write crs.
 
     def sum_seedings(self, rep_path):
         '''
@@ -2400,21 +2437,25 @@ class PMARmulti(PMAR):
         '''
 
         self.seedings = seedings
-        
+
         ppi_output_dir = Path(self.basedir) / f'ppi-{use_label}'
 
         self.ppi_cache = PMARCache(ppi_output_dir)
-             
-        ppi_path, ppi_exists = self.ppi_cache.raster_cache(context=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
+
+        # must resolve self.spatial_domain here, before this pre-flight cache check -- it would
+        # otherwise only ever get resolved as a side effect of get_trajectories() running below,
+        # which this check exists specifically to let us skip entirely on a cache hit
+        self._resolve_spatial_domain(seeding_shapefile, seed_within_bounds)
+        ppi_path, ppi_exists, _ = self.ppi_cache.raster_cache(reader_dataset_ids=sorted(self.spatial_domain['readers'].values()), pressure=self.pressure, chemical_compound=self.chemical_compound, seeding_shapefile=seeding_shapefile, seeding_radius=seeding_radius, res=res, pnum=None, ptot=pnum, start_time=start_time, duration=duration, seedings=seedings, seeding_id=self.seeding_id, tshift=tshift, use=use, use_label=use_label, emission=emission, decay_coef=decay_coef, study_area=study_area)#, aggregate=aggregate, depth_layer=depth_layer, z_bounds=z_bounds, particle_status=particle_status, traj_dens=traj_dens)
 
         if not self.output:
             self.output = xr.Dataset()
         
         if ppi_exists == True:
             logger.info('PPI with requested configurations found in cache.')
-            self.output['ppi'] = rxr.open_rasterio(ppi_path)
+            self.output['PPI'] = rxr.open_rasterio(ppi_path)
         else:
-            self.get_trajectories(pnum=pnum, start_time=start_time, seedings=seedings, tshift=tshift, end_time=end_time, duration_days=duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
+            self.get_trajectories(pnum=pnum, start_time=start_time, seedings=seedings, tshift=tshift, end_time=end_time, duration=duration, study_area=study_area, seeding_shapefile=seeding_shapefile, seed_within_bounds=seed_within_bounds, z=z, tstep=tstep, hdiff=hdiff, termvel=termvel, crs=crs, seeding_radius=seeding_radius, beaching=beaching, stokes_drift=stokes_drift, pnum_per_shape=pnum_per_shape)
             self.get_ppi(res=res, use=use, use_label=use_label, emission=emission, study_area=study_area, decay_coef=decay_coef)
 
         self.get_indicators(res=res, study_area=study_area)
