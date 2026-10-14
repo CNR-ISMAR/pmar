@@ -1182,8 +1182,13 @@ class PMAR(object):
         # use cm_grid for tick_labels
         from pmar.plotting import plot_matrix
         import matplotlib.pyplot as plt
-        cm = self.cm.toarray() # my cm is now by default a sparse array. to plot it, must convert it to a dense array
-
+        from scipy.sparse import issparse
+        
+        if issparse(self.cm):
+            cm = self.cm.toarray() # pmar cm is now by default a sparse array. to plot it, must convert it to a dense array
+        else:
+            cm = self.cm
+            
         if mask is not None:
             mask = cm<=mask
 

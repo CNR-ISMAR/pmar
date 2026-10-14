@@ -832,9 +832,11 @@ def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature
     stroke width/color, so this *has* to be baked into the geometry itself rather than
     left to app styling.
 
-    Every edge/arrowhead feature's properties carry 'source', 'target' (node indices) and
+    Every edge/arrowhead feature's properties carry 'source', 'target' and
     `weight_attr` (by default 'p', the transition probability from G's 'p' edge
-    attribute). GeoJSON itself has no notion of stroke thickness, so if `style` is set,
+    attribute). 'source'/'target' are the node's 'node_name' attribute when G has one
+    set (e.g. string labels for marine protected areas), falling back to the integer
+    node index otherwise. GeoJSON itself has no notion of stroke thickness, so if `style` is set,
     the edge's line width/color are *also* baked into the file as literal values, under
     the de-facto "simplestyle-spec" property names ('stroke-width', 'stroke',
     'stroke-opacity', and for arrowheads 'fill'/'fill-opacity') that GitHub, geojson.io
@@ -856,7 +858,8 @@ def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature
     ----------
     G : networkx.DiGraph
         Directed, weighted graph as returned by PMAR.get_network() (edges must carry a
-        `weight_attr` attribute).
+        `weight_attr` attribute). If G has a 'node_name' node attribute set, it is used
+        to label 'source'/'target' in edge properties instead of raw node indices.
     node_shapes : geopandas.GeoDataFrame
         Polygon (or point) grid giving node positions, in the same row order as G's nodes
         (e.g. the same node_shapes passed to PMAR.plot_network / pmar.plotting._plot_network,
@@ -991,6 +994,12 @@ def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature
             'properties': {'fill': fill_color, 'fill-opacity': 1.0},
         }
 
+    node_names = nx.get_node_attributes(G, 'node_name')
+
+    def _node_label(n):
+        """Return n's 'node_name' attribute if G has one set, else its integer index."""
+        return node_names[n] if n in node_names else int(n)
+
     features = []
     for u, v, data in G.edges(data=True):
         x1, y1 = positions[u]
@@ -1023,7 +1032,7 @@ def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature
 
         value = data[weight_attr]
         t = _normalize(value)
-        props = {'source': int(u), 'target': int(v), weight_attr: float(value)}
+        props = {'source': _node_label(u), 'target': _node_label(v), weight_attr: float(value)}
         if style:
             props.update(_edge_style_props(t))
 
@@ -1036,7 +1045,7 @@ def network_to_geojson(G, node_shapes, out_path=None, weight_attr='p', curvature
         if draw_arrows and (not is_self_loop or self_loop_arrow):
             fill_color = props.get('stroke', '#333333')
             arrow_feature = _arrowhead(line_coords, t, fill_color)
-            arrow_feature['properties'].update({'source': int(u), 'target': int(v), weight_attr: float(value)})
+            arrow_feature['properties'].update({'source': _node_label(u), 'target': _node_label(v), weight_attr: float(value)})
             features.append(arrow_feature)
 
     if include_nodes:
