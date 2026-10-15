@@ -820,7 +820,7 @@ class PMAR(object):
             Bin number(s) matching the trajectory (and, if t is None, time) dimensions of ds.
         '''
 
-        # if i opened multiple seedings with mfdataset, this does not work, because most particles are inactive at the first timestep. 
+        # if multiple seedings are opened with mfdataset, this does not work, because most particles are inactive at the first timestep. 
         #if 'seeding' in list(self.ds.dims):
          #   ds = self.ds.bfill('time')
         #else:
@@ -1258,12 +1258,14 @@ class PMAR(object):
             self.cm_grid's node_name and geometry columns, plus 'in_strength',
             'out_strength' and 'betweenness' for each cell.
         '''
-        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
+        #if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
+        if len(self.cm_grid)+1 == self.cm.shape[0]:
             cm = self.cm.tocsr()[:-1,:-1] # exclude buffer 
-            cm_grid = self.cm_grid[:-1]
+            #cm_grid = self.cm_grid[:-1]
         else:
             cm = self.cm
-            cm_grid = self.cm_grid
+        
+        cm_grid = self.cm_grid
         
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) 
         
@@ -1431,7 +1433,8 @@ class PMAR(object):
         if cm is None:
             cm = self.cm
 
-        if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
+        #if self.cm_grid[self.cm_grid.columns.drop('geometry')].iloc[-1][0] == BUFFER_CELL_SENTINEL:
+        if len(self.cm_grid)+1 == self.cm.shape[0]:
             cm = self.cm.tocsr()[:-1,:-1]
             
         G = nx.from_scipy_sparse_array(cm, create_using=nx.DiGraph, edge_attribute='p', parallel_edges=False) # important to specify DiGraph (directed graph) and parallel edges; 'p' for transition probability, matching connectivity_analysis()
